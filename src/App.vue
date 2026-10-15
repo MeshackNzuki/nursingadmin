@@ -62,6 +62,8 @@ const lastQuestionPayload = ref(null)
 const questionPayloadError = ref('')
 const payloadCopied = ref(false)
 const explanationEditor = ref(null)
+const explanationLatexError = ref('')
+const explanationLatexMessage = ref('')
 const questionPayloadJson = computed(() => lastQuestionPayload.value ? JSON.stringify(lastQuestionPayload.value, null, 2) : '')
 const subtopics = ref([])
 const subtopicsLoading = ref(false)
@@ -534,7 +536,7 @@ function readPasteBlocks(html) {
     if (element.tagName === 'OL' || element.tagName === 'UL') {
       const items = [...element.children].filter(child => child.tagName === 'LI')
       return items.map((item, listIndex) => ({
-        html: item.outerHTML,
+        html: item.innerHTML,
         text: (item.textContent || '').replace(/\u00a0/g, ' ').trim(),
         listType: element.tagName === 'OL' ? 'ordered' : 'unordered',
         listIndex,
@@ -608,6 +610,16 @@ function removeChoiceLabel(html, type) {
   }
   return type === 'listNumber' ? html : stripHtmlPrefix(html, expressions[type] || expressions.letterPunct)
 }
+function inlineChoiceParagraphs(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  for (const paragraph of [...doc.body.querySelectorAll('p')]) {
+    const replacement = doc.createDocumentFragment()
+    if (paragraph.previousSibling) replacement.append(doc.createTextNode(' '))
+    while (paragraph.firstChild) replacement.append(paragraph.firstChild)
+    paragraph.replaceWith(replacement)
+  }
+  return `<p>${doc.body.innerHTML}</p>`
+}
 function parsePastedQuestion(html) {
   const blocks = readPasteBlocks(html)
   if (!blocks.length) throw new Error('Paste a question and its answer choices into the field first.')
@@ -634,24 +646,24 @@ function parsePastedQuestion(html) {
       prompt = stemBlocks.slice(1).map(block => block.html.replace(/^<p>\s*question\s*:\s*/i, '<p>')).join('')
     } else prompt = stripHtmlPrefix(combined, /^\s*question\s*:\s*/i)
 
-    choiceBlocks = blocks.slice(detectedLabels.index).map(block => htmlText(removeChoiceLabel(block.html, detectedLabels.type))).filter(Boolean)
+    choiceBlocks = blocks.slice(detectedLabels.index).map(block => removeChoiceLabel(block.html, detectedLabels.type)).filter(content => htmlText(content))
   } else if (blocks.length >= 3) {
     const firstSplit = firstSentenceSplit(blocks[0].html)
     if (firstSplit && blocks.length >= 3) {
       intro = firstSplit[0]
       prompt = firstSplit[1]
-      choiceBlocks = blocks.slice(1).map(block => block.text)
+      choiceBlocks = blocks.slice(1).map(block => block.html)
     } else if (blocks.length >= 4) {
       intro = blocks[0].html
       prompt = blocks[1].html
-      choiceBlocks = blocks.slice(2).map(block => block.text)
+      choiceBlocks = blocks.slice(2).map(block => block.html)
     } else {
       prompt = blocks[0].html
-      choiceBlocks = blocks.slice(1).map(block => block.text)
+      choiceBlocks = blocks.slice(1).map(block => block.html)
     }
   }
 
-  const choices = choiceBlocks.map(text => text.trim()).filter(Boolean)
+  const choices = choiceBlocks.map(content => inlineChoiceParagraphs(content).trim()).filter(content => htmlText(content))
   if (!htmlText(prompt) || choices.length < 2) throw new Error('Could not identify the question and at least two choices. Put each choice on its own line and label them A./B./C./D., A)/B)/C)/D), or 1./2./3./4.')
   return { intro, prompt, choices }
 }
@@ -668,31 +680,45 @@ function importPastedQuestion() {
     wordImportError.value = error instanceof Error ? error.message : 'The pasted question could not be parsed.'
   }
 }
+async function convertLatexToMathML(source) {
+  const mathJax = window.MathJax
+  if (!mathJax?.tex2mmlPromise) throw new Error('MathJax is still loading. Try again in a moment.')
+  const pattern = /\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g
+  const matches = [...source.matchAll(pattern)]
+  if (!matches.length) throw new Error('No LaTeX found. Use \\(…\\), \\[ … \\], or $…$ delimiters.')
+  let converted = ''
+  let cursor = 0
+  for (const match of matches) {
+    converted += source.slice(cursor, match.index)
+    const tex = match[1] ?? match[2] ?? match[3] ?? match[4]
+    converted += await mathJax.tex2mmlPromise(tex.trim(), { display: false })
+    cursor = match.index + match[0].length
+  }
+  return { content: converted + source.slice(cursor), count: matches.length }
+}
 async function convertPastedQuestionLatex() {
   wordImportError.value = ''
   wordImportMessage.value = ''
   try {
-    const mathJax = window.MathJax
-    if (!mathJax?.tex2mmlPromise) throw new Error('MathJax is still loading. Try again in a moment.')
     window.clearTimeout(questionAutoImportTimer)
-    const source = wordPasteHtml.value
-    const pattern = /\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g
-    const matches = [...source.matchAll(pattern)]
-    if (!matches.length) throw new Error('No LaTeX found. Use \\(…\\), \\[ … \\], or $…$ delimiters.')
-    let converted = ''
-    let cursor = 0
-    for (const match of matches) {
-      converted += source.slice(cursor, match.index)
-      const display = match[1] !== undefined || match[3] !== undefined
-      const tex = match[1] ?? match[2] ?? match[3] ?? match[4]
-      converted += await mathJax.tex2mmlPromise(tex.trim(), { display })
-      cursor = match.index + match[0].length
-    }
-    wordPasteHtml.value = converted + source.slice(cursor)
+    const { content, count } = await convertLatexToMathML(wordPasteHtml.value)
+    wordPasteHtml.value = content
     importPastedQuestion()
-    wordImportMessage.value = `Converted ${matches.length} LaTeX expression${matches.length === 1 ? '' : 's'} to MathML and refreshed the question fields.`
+    wordImportMessage.value = `Converted ${count} LaTeX expression${count === 1 ? '' : 's'} to MathML and refreshed the question fields.`
   } catch (error) {
     wordImportError.value = error instanceof Error ? error.message : 'LaTeX conversion failed.'
+  }
+}
+async function convertExplanationLatex() {
+  explanationLatexError.value = ''
+  explanationLatexMessage.value = ''
+  explanationEditor.value?.syncContent()
+  try {
+    const { content, count } = await convertLatexToMathML(questionDraft.value.explanation || '')
+    questionDraft.value.explanation = content
+    explanationLatexMessage.value = `Converted ${count} LaTeX expression${count === 1 ? '' : 's'} to MathML.`
+  } catch (error) {
+    explanationLatexError.value = error instanceof Error ? error.message : 'LaTeX conversion failed.'
   }
 }
 function scheduleQuestionAutoImport() {
@@ -719,7 +745,7 @@ function importPastedRationales() {
       if (choiceIndex < 0 || choiceIndex >= questionDraft.value.choices.length) return
       const contentHtml = label ? stripHtmlPrefix(block.html, label.expression) : block.html
       const rawContent = htmlRawText(contentHtml)
-      const optionText = (questionDraft.value.choices[choiceIndex]?.option || '').trim()
+      const optionText = htmlText(questionDraft.value.choices[choiceIndex]?.option || '')
       const optionMatch = optionText && rawContent.trimStart().toLocaleLowerCase().startsWith(optionText.toLocaleLowerCase())
         ? rawContent.indexOf(optionText.trim()) + optionText.trim().length
         : -1
@@ -740,6 +766,19 @@ function importPastedRationales() {
     rationaleImportMessage.value = `Filled ${updates.length} choice rationale${updates.length === 1 ? '' : 's'}. Review them before saving.`
   } catch (error) {
     rationaleImportError.value = error instanceof Error ? error.message : 'The rationales could not be parsed.'
+  }
+}
+async function convertPastedRationalesLatex() {
+  rationaleImportError.value = ''
+  rationaleImportMessage.value = ''
+  try {
+    const { content, count } = await convertLatexToMathML(rationalePasteHtml.value)
+    rationalePasteHtml.value = content
+    importPastedRationales()
+    if (rationaleImportError.value) return
+    rationaleImportMessage.value = `Converted ${count} LaTeX expression${count === 1 ? '' : 's'} to MathML. ${rationaleImportMessage.value}`
+  } catch (error) {
+    rationaleImportError.value = error instanceof Error ? error.message : 'LaTeX conversion failed.'
   }
 }
 function scheduleRationaleAutoImport() {
@@ -773,7 +812,7 @@ async function saveQuestionContent() {
     text: choice.option.trim(),
     rationale: choice.rationale || '',
     correct: choice.correct,
-  })).filter(choice => choice.text)
+  })).filter(choice => htmlText(choice.text))
   const payload = {
     subtopic_id: draft.subtopicId ? Number(draft.subtopicId) : null,
     premade_exam_id: draft.premadeExamId ? Number(draft.premadeExamId) : null,
@@ -837,6 +876,7 @@ async function saveQuestionContent() {
       questionDrafts.value[questionPage.value.code] = questionDraft.value
       toast.value = isEditing ? 'Question updated successfully' : 'Question created successfully'
     }
+    window.scrollTo({ top: 0, behavior: 'smooth' })
     window.setTimeout(() => toast.value = '', 2400)
   } catch (error) {
     questionPayloadError.value = error.message || 'The question could not be saved.'
@@ -1125,7 +1165,7 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
             <div v-if="questionLayout.rationalePaste" class="word-import-block rationale-import-block">
               <div class="word-import-heading"><div><p class="word-import-title">Paste choice rationales</p><p class="word-import-copy">Use one labeled line per choice, like “A. Simvastatin: rationale text”. Bold formatting is preserved.</p></div><span class="word-badge">MCQ ONLY</span></div>
               <div class="rationale-paste-editor"><RichEditor v-model="rationalePasteHtml" :height="170" @paste="scheduleRationaleAutoImport" @change="scheduleRationaleAutoImport" /></div>
-              <div class="word-paste-actions"><span class="word-drop-hint">Pasting auto-fills rationales. A./B./C./D. or 1./2./3./4. labels map to choices.</span><button type="button" class="context-lock-button" :disabled="!htmlText(rationalePasteHtml)" @click="importPastedRationales">Fill rationales again</button></div>
+              <div class="word-paste-actions"><span class="word-drop-hint">Pasting auto-fills rationales. Convert LaTeX before importing if needed. A./B./C./D. or 1./2./3./4. labels map to choices.</span><button type="button" class="context-lock-button" :disabled="!htmlText(rationalePasteHtml)" @click="convertPastedRationalesLatex">Convert LaTeX</button><button type="button" class="context-lock-button" :disabled="!htmlText(rationalePasteHtml)" @click="importPastedRationales">Fill rationales again</button></div>
               <p v-if="rationaleImportError" class="field-error word-import-feedback">{{ rationaleImportError }}</p>
               <p v-if="rationaleImportMessage" class="word-import-success">{{ rationaleImportMessage }}</p>
             </div>
@@ -1134,14 +1174,14 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
           <section class="builder-section"><div class="section-heading"><span class="section-number">02</span><div><h2>Question introduction <span class="optional-tag">Optional</span></h2><p>Add shared context, a clinical scenario, or instructions shown before the question.</p></div></div><div class="question-editor"><RichEditor :key="`${questionPage.code}-intro`" v-model="questionDraft.questionIntro" :height="130" /></div></section>
           <section class="builder-section"><div class="section-heading"><span class="section-number">03</span><div><h2>Question</h2><p>Paste or write the question learners will answer.</p></div></div><div class="question-editor"><RichEditor :key="`${questionPage.code}-prompt`" v-model="questionDraft.prompt" :height="190" /></div></section>
           <section v-if="isFillBlank" class="builder-section fill-blank-answer-section"><div class="section-heading"><span class="section-number">04</span><div><h2>Answer</h2><p>Enter the expected word, phrase, or value for the blank.</p></div></div><label class="form-field"><span>Accepted answer <b>*</b></span><input v-model="questionDraft.answer" class="choice-input" placeholder="Enter the correct answer" required /></label><label class="form-field fill-blank-unit"><span>Unit <small>Optional · choose a common unit or enter your own</small></span><input v-model="questionDraft.unit" class="choice-input" placeholder="e.g. mg, mL, bpm, tablet(s)" /><span class="unit-shortcuts"><button v-for="unit in commonUnits" :key="unit" type="button" class="unit-chip" :class="{ selected: questionDraft.unit === unit }" @click="setQuestionUnit(unit)">{{ unit }}</button></span></label></section>
-          <section v-if="usesChoices" class="builder-section choices-section"><div class="section-heading"><span class="section-number">04</span><div><h2>Answer choices <span class="optional-tag">Options stay plain text</span></h2><p>Add each option, mark the correct answer, then write its rationale directly below.</p></div></div>
+          <section v-if="usesChoices" class="builder-section choices-section"><div class="section-heading"><span class="section-number">04</span><div><h2>Answer choices <span class="optional-tag">Formatted content supported</span></h2><p>Add each option, mark the correct answer, then write its rationale directly below.</p></div></div>
             <div class="choice-list"><article v-for="(choice, index) in questionDraft.choices" :key="choice.id" class="choice-card"><div class="choice-topline"><div class="choice-label"><span class="choice-letter">{{ String.fromCharCode(65 + index) }}</span><span>Choice {{ index + 1 }}</span></div><label class="correct-choice"><input :checked="choice.correct" :type="questionLayout.correctAnswerMode === 'single' ? 'radio' : 'checkbox'" :name="`correct-${questionPage.code}`" @change="setCorrect(choice, $event.target.checked)"/><span>{{ questionLayout.correctAnswerMode === 'single' ? 'Correct answer' : 'Mark as correct' }}</span></label><button v-if="questionDraft.choices.length > 2" class="remove-choice" type="button" @click="removeChoice(choice.id)">Remove</button></div>
-              <input v-model="choice.option" class="choice-input" :placeholder="`Enter choice ${index + 1}`" :aria-label="`Choice ${index + 1} text`" />
+              <RichEditor :key="`${questionPage.code}-choice-${choice.id}`" v-model="choice.option" :height="90" />
               <div class="rationale-block"><label :for="`rationale-label-${choice.id}`" class="rationale-label"><span>Rationale</span><small>Feedback for this choice</small></label><RichEditor :key="`${questionPage.code}-rationale-${choice.id}`" v-model="choice.rationale" :height="105" /></div>
             </article></div>
             <button type="button" class="add-choice-button" @click="addChoice"><span>+</span> Add another choice</button>
           </section>
-          <section class="builder-section explanation-section"><div class="section-heading"><span class="section-number">05</span><div><h2>{{ isFillBlank ? 'Explanation' : 'Full explanation' }}</h2><p>{{ isFillBlank ? 'Explain why this answer is correct.' : 'Give the complete clinical reasoning after all choices and rationales.' }}</p></div></div><div class="explanation-editor"><RichEditor ref="explanationEditor" :key="`${questionPage.code}-explanation`" v-model="questionDraft.explanation" :height="190" /></div></section>
+          <section class="builder-section explanation-section"><div class="section-heading"><span class="section-number">05</span><div><h2>{{ isFillBlank ? 'Explanation' : 'Full explanation' }}</h2><p>{{ isFillBlank ? 'Explain why this answer is correct.' : 'Give the complete clinical reasoning after all choices and rationales.' }}</p></div></div><div class="explanation-editor"><RichEditor ref="explanationEditor" :key="`${questionPage.code}-explanation`" v-model="questionDraft.explanation" :height="190" /></div><div class="mt-2 flex flex-wrap items-center gap-3"><button type="button" class="context-lock-button" :disabled="!htmlText(questionDraft.explanation)" @click="convertExplanationLatex">Convert LaTeX</button><p v-if="explanationLatexError" class="field-error">{{ explanationLatexError }}</p><p v-if="explanationLatexMessage" class="word-import-success">{{ explanationLatexMessage }}</p></div></section>
           <p v-if="questionPayloadError" class="field-error px-6 pb-3">{{ questionPayloadError }}</p>
           <div class="builder-footer"><button class="cancel-button" type="button" @click="returnToQuestionTypes()">{{ editingQuestionId ? 'Cancel edit' : 'Back to question types' }}</button><button class="primary-button" type="submit" :disabled="questionSaving || !hasQuestionContext || !questionDraft.prompt.trim() || (isFillBlank && !questionDraft.answer.trim())">{{ questionSaving ? (editingQuestionId ? 'Updating…' : 'Saving…') : (editingQuestionId ? 'Update question' : 'Save question') }} <span v-if="!questionSaving">→</span></button></div>
         </form>

@@ -36,7 +36,7 @@ onMounted(() => {
       height: props.height,
       removePlugins: 'elementspath',
       resize_enabled: false,
-      extraAllowedContent: 'math[*]; semantics; annotation[*]; mrow; mi; mn; mo; mfrac; msup; msub; msqrt; mroot; mtext; mover; munder; munderover; mtable; mtr; mtd; menclose; mstyle[*]',
+      extraAllowedContent: 'math[*]; semantics[*]; annotation[*]; mrow[*]; mi[*]; mn[*]; mo[*]; mfrac[*]; msup[*]; msub[*]; msqrt[*]; mroot[*]; mtext[*]; mover[*]; munder[*]; munderover[*]; mtable[*]; mtr[*]; mtd[*]; menclose[*]; mstyle[*]; mspace[*]; mpadded[*]; mphantom[*]; mmultiscripts[*]; mprescripts[*]; none[*]; maction[*]; ms[*]; mglyph[*]; merror[*]',
       toolbar: [
         { name: 'document', items: ['Source'] },
         { name: 'basicstyles', items: ['Bold', 'Italic', 'Underline'] },
