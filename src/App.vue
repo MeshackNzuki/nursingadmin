@@ -23,7 +23,7 @@ const seed = [
   ['Multiple Response Group','MULTIPLE_RESPONSE_GROUP','The learner answers a group of related questions using multiple response options.','A grouped multiple-response format for clinical assessment items.'],
 ].map(([name, code, description, details], index) => ({ id: index + 1, name, code, description, details, active: true, category: index < 3 ? 'Core' : index < 8 ? 'Written' : 'Interactive', updated: index < 3 ? 'Today' : `${index + 1} days ago` }))
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://app.nursemerit.com').replace(/\/$/, '')
 const AUTH_TOKEN_KEY = 'nursing_content_auth_token'
 const PROFILE_KEY = 'nursing_content_profile'
 const QUESTION_SESSION_KEY = 'nursing_content_question_session_v1'
@@ -33,8 +33,12 @@ function readLocalJson(key, fallback) {
 const restoredQuestionSession = readLocalJson(QUESTION_SESSION_KEY, {})
 const apiUrl = (path) => `${API_BASE_URL}/api/${path.replace(/^\//, '')}`
 const authToken = ref(localStorage.getItem(AUTH_TOKEN_KEY) || '')
-const profile = ref(JSON.parse(localStorage.getItem(PROFILE_KEY) || 'null'))
+const profile = ref(readLocalJson(PROFILE_KEY, null))
 const isAuthenticated = computed(() => Boolean(authToken.value))
+function hasEditRole(roles) {
+  return Array.isArray(roles) && roles.some(role => ['admin', 'super-admin'].includes(String(role).trim().toLowerCase()))
+}
+const canEditContent = computed(() => hasEditRole(profile.value?.roles))
 const profileName = computed(() => profile.value?.name || profile.value?.email || 'Content admin')
 const profileInitials = computed(() => profileName.value.split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(part => part[0]?.toUpperCase()).join('') || 'CA')
 const loginForm = ref({ email: '', password: '' })
@@ -127,6 +131,10 @@ function responseRows(body, keys = []) {
   return []
 }
 async function apiRequest(path, options = {}, includeStatus = false) {
+  const method = String(options.method || 'GET').toUpperCase()
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !canEditContent.value) {
+    throw new Error('Access denied. Only admin and super-admin accounts can edit content.')
+  }
   const headers = new Headers(options.headers || {})
   headers.set('Accept', 'application/json')
   if (authToken.value) headers.set('Authorization', `Bearer ${authToken.value}`)
@@ -165,6 +173,9 @@ async function login() {
     if (!response.ok || !data?.token) {
       const errors = body?.errors ? Object.values(body.errors).flat().join(' ') : ''
       throw new Error(errors || data?.message || 'Unable to sign in. Check your email and password.')
+    }
+    if (!hasEditRole(data.roles)) {
+      throw new Error('Access denied. Only admin and super-admin accounts can edit content.')
     }
     authToken.value = data.token
     profile.value = { name: data.name, email: data.email, avatar: data.avatar, roles: data.roles }
@@ -434,7 +445,7 @@ function syncQuestionRoute() {
 onMounted(() => {
   syncQuestionRoute()
   window.addEventListener('popstate', syncQuestionRoute)
-  if (authToken.value) loadReferenceData()
+  if (isAuthenticated.value && canEditContent.value) loadReferenceData()
 })
 onBeforeUnmount(() => window.removeEventListener('popstate', syncQuestionRoute))
 function addChoice() { questionDraft.value.choices.push({ id: nextChoiceId++, option: '', rationale: '', correct: false }) }
@@ -1026,7 +1037,7 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
 <template>
   <main v-if="!isAuthenticated" class="flex min-h-screen items-center justify-center bg-[#f6f8fb] px-5 py-10 text-slate-800">
     <form class="w-full max-w-md rounded-2xl border border-slate-200/80 bg-white p-7 shadow-[0_12px_50px_rgba(35,54,86,.08)] sm:p-9" @submit.prevent="login">
-      <div class="mb-7 flex items-center gap-3"><div class="brand-mark"><svg viewBox="0 0 32 32" fill="none"><path d="M16 5v22M5 16h22" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/></svg></div><div><div class="font-display text-[17px] font-extrabold tracking-tight text-slate-900">CareLearn</div><div class="text-[10px] font-semibold uppercase tracking-[.16em] text-slate-400">Content admin</div></div></div>
+      <div class="mb-7 flex items-center gap-3"><div class="brand-mark"><svg viewBox="0 0 32 32" fill="none"><path d="M16 5v22M5 16h22" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/></svg></div><div><div class="font-display text-[17px] font-extrabold tracking-tight text-slate-900">Nursemerit</div><div class="text-[10px] font-semibold uppercase tracking-[.16em] text-slate-400">Content admin</div></div></div>
       <p class="eyebrow">SECURE WORKSPACE</p><h1 class="mt-2 font-display text-2xl font-extrabold tracking-tight text-slate-900">Sign in</h1><p class="mt-2 text-sm leading-6 text-slate-500">Sign in with your admin account to manage nursing content.</p>
       <label class="form-field mt-6"><span>Email</span><input v-model="loginForm.email" type="email" autocomplete="username" required placeholder="you@example.com" /></label>
       <label class="form-field mt-4"><span>Password</span><input v-model="loginForm.password" type="password" autocomplete="current-password" required placeholder="Your password" /></label>
@@ -1035,11 +1046,19 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
       <p class="mt-4 text-center text-[11px] text-slate-400">The API token is stored in this browser for authenticated requests.</p>
     </form>
   </main>
+  <main v-else-if="!canEditContent" class="flex min-h-screen items-center justify-center bg-[#f6f8fb] px-5 py-10 text-slate-800">
+    <section class="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-7 text-center shadow-[0_12px_50px_rgba(35,54,86,.08)] sm:p-9">
+      <p class="eyebrow text-rose-600">ACCESS DENIED</p>
+      <h1 class="mt-2 font-display text-2xl font-extrabold tracking-tight text-slate-900">No permission</h1>
+      <p class="mt-2 text-sm leading-6 text-slate-500">Only admin and super-admin accounts can access content editing.</p>
+      <button class="primary-button mt-6 w-full justify-center" type="button" @click="logout">Sign out</button>
+    </section>
+  </main>
   <div v-else class="min-h-screen bg-[#f6f8fb] text-slate-800">
     <aside class="sidebar fixed inset-y-0 left-0 z-20 hidden w-[248px] flex-col border-r border-slate-200/80 bg-white lg:flex">
       <div class="flex h-[76px] items-center gap-3 px-6">
         <div class="brand-mark"><svg viewBox="0 0 32 32" fill="none"><path d="M16 5v22M5 16h22" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2"/></svg></div>
-        <div><div class="font-display text-[17px] font-extrabold tracking-tight text-slate-900">CareLearn</div><div class="text-[10px] font-semibold uppercase tracking-[.16em] text-slate-400">Learning platform</div></div>
+        <div><div class="font-display text-[17px] font-extrabold tracking-tight text-slate-900">Nursemerit</div><div class="text-[10px] font-semibold uppercase tracking-[.16em] text-slate-400">Learning platform</div></div>
       </div>
       <div class="px-4 pt-8"><p class="nav-label">WORKSPACE</p>
         <nav class="mt-3 space-y-1">
@@ -1054,7 +1073,7 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
         <p class="nav-label mt-9">PREFERENCES</p>
         <nav class="mt-3 space-y-1"><a class="nav-item" href="#"><span class="nav-icon">⚙</span>Settings</a><a class="nav-item" href="#"><span class="nav-icon">◉</span>Help center</a></nav>
       </div>
-      <div class="mt-auto p-4"><div class="upgrade-card"><div class="mb-2 flex items-center gap-2"><span class="sparkle">✦</span><span class="text-xs font-bold text-slate-800">CareLearn Pro</span></div><p class="text-xs leading-5 text-slate-500">Create richer learning experiences for your nursing team.</p><button class="mt-3 text-xs font-bold text-indigo-600">Explore features <span>→</span></button></div>
+      <div class="mt-auto p-4"><div class="upgrade-card"><div class="mb-2 flex items-center gap-2"><span class="sparkle">✦</span><span class="text-xs font-bold text-slate-800">Nursemerit Pro</span></div><p class="text-xs leading-5 text-slate-500">Create richer learning experiences for your nursing team.</p><button class="mt-3 text-xs font-bold text-indigo-600">Explore features <span>→</span></button></div>
         <div class="mt-4 flex items-center gap-3 border-t border-slate-100 px-2 pt-4"><div class="avatar">{{ profileInitials }}</div><div class="min-w-0 flex-1"><p class="truncate text-xs font-bold text-slate-800">{{ profileName }}</p><p class="text-[11px] text-slate-400">{{ profile?.roles?.[0] || 'Content admin' }}</p></div><button class="text-slate-400" title="Sign out" @click="logout">↪</button></div></div>
     </aside>
 
