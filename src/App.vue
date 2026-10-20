@@ -18,7 +18,7 @@ const seed = [
   ['Highlight','HIGHLIGHT','The learner selects or highlights specific words, phrases, or items.','Highlight the target content in the question text.'],
   ['Bow-Tie','BOW_TIE','A clinical decision-making question requiring the learner to connect actions and outcomes.','For questions with multiple answers across linked clinical decision columns.'],
   ['Dropdown','DROPDOWN','The learner selects an answer from one or more dropdown menus.','Dropdown question type presents a choice list in context.'],
-  ['Grouping — Checkbox','GROUPING_CHECKBOX','The learner selects multiple items and assigns them to a category.','Checkbox grouping question (MMR).'],
+  ['Matrix Multiple Response','MATRIX_MULTIPLE_RESPONSE','The learner selects one or more responses for each manifestation or category.','A matrix question with independent multiple-response options for each row.'],
   ['Drag and Drop','DRAG_DROP','The learner drags items and places them into the appropriate areas.','Drag and Drop Question'],
   ['Multiple Response Group','MULTIPLE_RESPONSE_GROUP','The learner answers a group of related questions using multiple response options.','A grouped multiple-response format for clinical assessment items.'],
 ].map(([name, code, description, details], index) => ({ id: index + 1, name, code, description, details, active: true, category: index < 3 ? 'Core' : index < 8 ? 'Written' : 'Interactive', updated: index < 3 ? 'Today' : `${index + 1} days ago` }))
@@ -65,7 +65,10 @@ const questionSaving = ref(false)
 const lastQuestionPayload = ref(null)
 const questionPayloadError = ref('')
 const payloadCopied = ref(false)
+const introEditor = ref(null)
+const promptEditor = ref(null)
 const explanationEditor = ref(null)
+const tabEditors = ref({})
 const explanationLatexError = ref('')
 const explanationLatexMessage = ref('')
 const questionPayloadJson = computed(() => lastQuestionPayload.value ? JSON.stringify(lastQuestionPayload.value, null, 2) : '')
@@ -77,7 +80,7 @@ const premadeExamsLoading = ref(false)
 const premadeExamsError = ref('')
 const premadeExamSaving = ref(false)
 const premadeExamSaveError = ref('')
-const sessionContext = ref({ subtopicId: '', premadeExamId: '', ...(restoredQuestionSession.sessionContext || {}) })
+const sessionContext = ref({ subtopicId: '', premadeExamId: '', topicId: '', ...(restoredQuestionSession.sessionContext || {}) })
 const contextLocked = ref(Boolean(restoredQuestionSession.contextLocked))
 const hasLockedPremadeExam = computed(() => contextLocked.value && Boolean(sessionContext.value.premadeExamId))
 const subtopicRequired = computed(() => !questionDraft.value?.premadeExamId)
@@ -222,6 +225,52 @@ const premadeExamSelectOptions = computed(() => [
 ])
 const categoryOptions = computed(() => visibleCategories.value.map(item => ({ value: String(item.id), label: item.name })))
 const topicOptions = computed(() => visibleTopics.value.map(item => ({ value: String(item.id), label: item.name })))
+const NURSING_SCHOOL_PRODUCT_ID = '3'
+function examSubjectId(exam) {
+  const examTopicId = exam?.topic_id ?? exam?.topicId ?? exam?.topic?.id ?? exam?.topic?.topic_id
+  const examTopic = exam?.topic
+    ?? topics.value.find(item => String(item.id) === String(examTopicId))
+  return exam?.subject_id ?? exam?.subjectId ?? exam?.subject?.id ?? exam?.subject?.subject_id
+    ?? examTopic?.subject_id ?? examTopic?.subjectId ?? examTopic?.subject?.id ?? examTopic?.subject?.subject_id
+}
+const selectedQuestionExam = computed(() => {
+  const examId = questionDraft.value?.premadeExamId || sessionContext.value.premadeExamId
+  return premadeExamOptions.value.find(item => String(item.id) === String(examId))
+})
+const selectedQuestionExamSubjectId = computed(() => examSubjectId(selectedQuestionExam.value))
+const selectedQuestionExamIsNursingSchool = computed(() => {
+  const exam = selectedQuestionExam.value
+  if (!exam) return false
+  const subject = exam.subject
+    ?? subjects.value.find(item => String(item.id ?? item.subject_id) === String(selectedQuestionExamSubjectId.value))
+  const examTopicId = exam.topic_id ?? exam.topicId ?? exam.topic?.id ?? exam.topic?.topic_id
+  const examTopic = exam.topic ?? topics.value.find(item => String(item.id) === String(examTopicId))
+  const productId = exam.product_id ?? exam.productId ?? exam.product?.id ?? exam.product?.product_id
+    ?? subject?.product_id ?? subject?.productId ?? examTopic?.product_id ?? examTopic?.productId
+  return String(productId ?? '') === NURSING_SCHOOL_PRODUCT_ID
+})
+const questionTopicOptions = computed(() => {
+  const exam = selectedQuestionExam.value
+  if (!exam || !selectedQuestionExamIsNursingSchool.value) {
+    return topics.value.map(item => ({ value: String(item.id), label: item.name }))
+  }
+  if (selectedQuestionExamSubjectId.value == null) return []
+  return topics.value
+    .filter(item => {
+      const topicSubjectId = item.subject_id ?? item.subjectId ?? item.subject?.id ?? item.subject?.subject_id
+      return topicSubjectId != null
+        && String(topicSubjectId) === String(selectedQuestionExamSubjectId.value)
+    })
+    .map(item => ({ value: String(item.id), label: item.name }))
+})
+watch([questionTopicOptions, taxonomyLoading], () => {
+  const topicId = questionDraft.value?.topicId
+  if (taxonomyLoading.value || !topicId) return
+  if (!questionTopicOptions.value.some(item => item.value === String(topicId))) {
+    questionDraft.value.topicId = ''
+    sessionContext.value.topicId = ''
+  }
+})
 async function fetchTaxonomy() {
   taxonomyLoading.value = true
   taxonomyError.value = ''
@@ -252,8 +301,10 @@ async function fetchQuestionTypes() {
   try {
     const response = await apiRequest(QUESTION_TYPES_ENDPOINT)
     questions.value = responseRows(response, ['question_types', 'questionTypes']).map((item, index) => {
-      const code = item.code ?? item.type_code ?? item.key ?? ''
+      const sourceCode = item.code ?? item.type_code ?? item.key ?? ''
+      const normalizedCode = String(sourceCode).trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
       const id = item.id ?? item.question_type_id
+      const code = normalizedCode
       return {
         ...item,
         id: id ?? index + 1,
@@ -282,20 +333,65 @@ const visibleQuestions = computed(() => questions.value.filter(q => {
 const enabledCount = computed(() => questions.value.filter(q => q.active).length)
 const questionLayout = computed(() => getQuestionTypeLayout(questionPage.value?.code))
 const isFillBlank = computed(() => questionLayout.value.layout === 'fillBlank')
+const isBowTie = computed(() => questionLayout.value.layout === 'bowTie')
+const isMatrixMultipleResponse = computed(() => questionLayout.value.layout === 'matrixMultipleResponse')
+const isMatrixClassification = computed(() => questionLayout.value.layout === 'matrixClassification')
+const isDropdown = computed(() => questionLayout.value.layout === 'dropdown')
+const isHighlight = computed(() => questionLayout.value.layout === 'highlight')
 const usesChoices = computed(() => questionLayout.value.layout === 'choices')
+const bowTieChoiceGroups = [
+  { key: 'conditionOptions', title: 'Potential condition', correctLabel: 'Correct condition' },
+  { key: 'actionOptions', title: 'Actions to take', correctLabel: 'Correct action' },
+  { key: 'monitorOptions', title: 'Parameters to monitor', correctLabel: 'Correct parameter' },
+]
 const commonUnits = ['mg', 'mcg', 'g', 'kg', 'mL', 'L', 'units', 'IU', 'tablet(s)', 'capsule(s)', 'drop(s)', 'mEq', 'mmol', 'bpm', 'mmHg', '°C', '°F', '%']
 let nextChoiceId = 1
+let nextTabId = 1
+let nextHighlightId = 1
+let nextMatrixClassificationId = 1
+let nextDropdownId = 1
+function normalizeDraftTabs(value) {
+  const tabs = parseJsonValue(value, [])
+  if (!Array.isArray(tabs)) return []
+  return tabs.map(tab => ({
+    id: nextTabId++,
+    title: typeof tab?.title === 'string' ? tab.title : '',
+    content: typeof tab?.content === 'string' ? tab.content : '',
+  }))
+}
 function blankQuestionDraft(type) {
   const layout = getQuestionTypeLayout(type.code)
   const initialChoices = layout.defaultChoices
   return {
     subtopicId: '',
     premadeExamId: '',
+    topicId: '',
     questionIntro: '',
     prompt: '',
     answer: '',
     choices: initialChoices.map((option) => ({ id: nextChoiceId++, option, rationale: '', correct: false })),
-    tabs: '',
+    highlightTargets: [],
+    bowTie: {
+      conditionOptions: [blankBowTieOption('c1'), blankBowTieOption('c2')],
+      actionOptions: [blankBowTieOption('a1'), blankBowTieOption('a2'), blankBowTieOption('a3')],
+      monitorOptions: [blankBowTieOption('m1'), blankBowTieOption('m2'), blankBowTieOption('m3')],
+    },
+    matrixRows: [
+      blankMatrixRow(),
+      blankMatrixRow(),
+      blankMatrixRow(),
+    ],
+    matrixClassificationColumns: [
+      blankMatrixClassificationColumn(),
+      blankMatrixClassificationColumn(),
+    ],
+    matrixClassificationRows: [
+      blankMatrixClassificationRow(),
+      blankMatrixClassificationRow(),
+      blankMatrixClassificationRow(),
+    ],
+    dropdowns: [],
+    tabs: [],
     unit: '',
     difficulty: 'medium',
     points: 1,
@@ -303,6 +399,193 @@ function blankQuestionDraft(type) {
     status: 'draft',
     displayOrder: 0,
   }
+}
+function addHighlightTarget() {
+  let id
+  do { id = `h${nextHighlightId++}` }
+  while (questionDraft.value.highlightTargets.some(target => target.id === id))
+  const text = promptEditor.value?.wrapSelection('data-highlight-id', id) || ''
+  if (!text) {
+    questionPayloadError.value = 'Select some passage text in the editor before marking it as a highlight target.'
+    return
+  }
+  questionPayloadError.value = ''
+  questionDraft.value.highlightTargets.push({ id, text, correct: false })
+}
+function removeHighlightTarget(target) {
+  promptEditor.value?.removeMarkedText('data-highlight-id', target.id)
+  questionDraft.value.highlightTargets = questionDraft.value.highlightTargets.filter(item => item.id !== target.id)
+}
+function blankDropdownOption(id) {
+  return { id, text: '', correct: false }
+}
+function addDropdown() {
+  let id
+  do { id = `d${nextDropdownId++}` }
+  while (questionDraft.value.dropdowns.some(dropdown => dropdown.id === id))
+  const nextNumber = questionDraft.value.dropdowns.reduce((highest, dropdown) => {
+    const match = String(dropdown.label).match(/^Select (\d+)$/)
+    return Math.max(highest, Number(match?.[1] || 0))
+  }, 0) + 1
+  const label = `Select ${nextNumber}`
+  const inserted = promptEditor.value?.insertHtmlAtCursor(
+    `<span data-dropdown-id="${id}">${label}</span>`,
+  )
+  if (!inserted) {
+    questionPayloadError.value = 'The question editor is not ready to insert a dropdown. Try again in a moment.'
+    return
+  }
+  questionPayloadError.value = ''
+  questionDraft.value.dropdowns.push({
+    id,
+    label,
+    options: [blankDropdownOption('a'), blankDropdownOption('b')],
+  })
+}
+function removeDropdown(dropdown) {
+  promptEditor.value?.removeMarkedText('data-dropdown-id', dropdown.id)
+  questionDraft.value.dropdowns = questionDraft.value.dropdowns
+    .filter(item => item.id !== dropdown.id)
+}
+function addDropdownOption(dropdown) {
+  dropdown.options.push(blankDropdownOption(matrixOptionId(dropdown.options.length)))
+}
+function removeDropdownOption(dropdown, optionId) {
+  dropdown.options = dropdown.options.filter(option => option.id !== optionId)
+  dropdown.options.forEach((option, index) => { option.id = matrixOptionId(index) })
+}
+function setDropdownCorrect(dropdown, selectedOption) {
+  dropdown.options.forEach(option => { option.correct = option.id === selectedOption.id })
+}
+function normalizeDropdowns(options, correctAnswer) {
+  return options.dropdowns.map(dropdown => ({
+    id: dropdown.id,
+    label: dropdown.label,
+    options: dropdown.options.map(option => ({
+      id: option.id,
+      text: option.text,
+      correct: correctAnswer[dropdown.id] === option.id,
+    })),
+  }))
+}
+function blankMatrixRow() {
+  return {
+    id: `matrix-row-${nextChoiceId++}`,
+    label: '',
+    options: [
+      { id: 'a', text: '', correct: false },
+      { id: 'b', text: '', correct: false },
+      { id: 'c', text: '', correct: false },
+    ],
+  }
+}
+function matrixRowKey(label) {
+  return String(label).normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+}
+function matrixOptionId(index) {
+  let value = index + 1
+  let id = ''
+  while (value > 0) {
+    value -= 1
+    id = String.fromCharCode(97 + value % 26) + id
+    value = Math.floor(value / 26)
+  }
+  return id
+}
+function addMatrixRow() { questionDraft.value.matrixRows.push(blankMatrixRow()) }
+function removeMatrixRow(rowId) {
+  questionDraft.value.matrixRows = questionDraft.value.matrixRows.filter(row => row.id !== rowId)
+}
+function addMatrixOption(row) {
+  row.options.push({ id: matrixOptionId(row.options.length), text: '', correct: false })
+}
+function removeMatrixOption(row, optionId) {
+  row.options = row.options.filter(option => option.id !== optionId)
+  row.options.forEach((option, index) => { option.id = matrixOptionId(index) })
+}
+function blankMatrixClassificationColumn() {
+  return { id: `classification-column-${nextMatrixClassificationId++}`, label: '' }
+}
+function blankMatrixClassificationRow() {
+  return { id: `classification-row-${nextMatrixClassificationId++}`, label: '', selectedColumnIds: [] }
+}
+function addMatrixClassificationColumn() {
+  questionDraft.value.matrixClassificationColumns.push(blankMatrixClassificationColumn())
+}
+function removeMatrixClassificationColumn(columnId) {
+  questionDraft.value.matrixClassificationColumns = questionDraft.value.matrixClassificationColumns
+    .filter(column => column.id !== columnId)
+  questionDraft.value.matrixClassificationRows.forEach(row => {
+    row.selectedColumnIds = row.selectedColumnIds.filter(id => id !== columnId)
+  })
+}
+function addMatrixClassificationRow() {
+  questionDraft.value.matrixClassificationRows.push(blankMatrixClassificationRow())
+}
+function removeMatrixClassificationRow(rowId) {
+  questionDraft.value.matrixClassificationRows = questionDraft.value.matrixClassificationRows
+    .filter(row => row.id !== rowId)
+}
+function normalizeMatrixClassification(options, correctAnswer) {
+  if (!options || Array.isArray(options) || typeof options !== 'object') return { columns: [], rows: [] }
+  const entries = Object.entries(options)
+  const sourceColumns = Array.isArray(entries[0]?.[1]?.options) ? entries[0][1].options : []
+  const columns = sourceColumns.map((option, index) => ({
+    id: `classification-column-${nextMatrixClassificationId++}`,
+    answerId: String(option?.id ?? matrixOptionId(index)),
+    label: String(option?.text ?? ''),
+  }))
+  const columnIdsByAnswerId = new Map(columns.map(column => [column.answerId, column.id]))
+  const rows = entries.map(([key, row], index) => {
+    const answerIds = String(correctAnswer?.[key]?.answers ?? '').split(',').map(id => id.trim()).filter(Boolean)
+    return {
+      id: `classification-row-${nextMatrixClassificationId++}`,
+      label: String(row?.label ?? ''),
+      selectedColumnIds: answerIds.map(id => columnIdsByAnswerId.get(id)).filter(Boolean),
+    }
+  })
+  return { columns, rows }
+}
+function normalizeMatrixRows(options, correctAnswer) {
+  if (!options || Array.isArray(options) || typeof options !== 'object') return []
+  return Object.entries(options).map(([key, row], rowIndex) => {
+    const correctIds = String(correctAnswer?.[key]?.answers ?? '').split(',').map(id => id.trim()).filter(Boolean)
+    const rowOptions = Array.isArray(row?.options) ? row.options : []
+    return {
+      id: `matrix-row-${rowIndex + 1}-${nextChoiceId++}`,
+      label: String(row?.label ?? ''),
+      options: rowOptions.map((option, optionIndex) => ({
+        id: String(option?.id ?? matrixOptionId(optionIndex)),
+        text: String(option?.text ?? ''),
+        correct: correctIds.includes(String(option?.id ?? matrixOptionId(optionIndex))),
+      })),
+    }
+  })
+}
+function blankBowTieOption(id) { return { id, text: '', correct: false } }
+function addBowTieOption(group) {
+  const prefix = { conditionOptions: 'c', actionOptions: 'a', monitorOptions: 'm' }[group]
+  const options = questionDraft.value.bowTie[group]
+  let index = options.length + 1
+  while (options.some(option => option.id === `${prefix}${index}`)) index += 1
+  options.push(blankBowTieOption(`${prefix}${index}`))
+}
+function removeBowTieOption(group, optionId) {
+  questionDraft.value.bowTie[group] = questionDraft.value.bowTie[group].filter(option => option.id !== optionId)
+}
+function setBowTieCorrect(group, option, checked) {
+  if (group === 'conditionOptions' && checked) {
+    questionDraft.value.bowTie[group].forEach(item => { item.correct = item.id === option.id })
+  } else option.correct = checked
+}
+function normalizeBowTieOptions(options, prefix, correctIds = []) {
+  if (!Array.isArray(options)) return []
+  return options.map((option, index) => ({
+    id: String(option?.id ?? `${prefix}${index + 1}`),
+    text: String(option?.text ?? option?.option_text ?? ''),
+    correct: correctIds.includes(String(option?.id ?? `${prefix}${index + 1}`)),
+  }))
 }
 async function fetchSubtopics() {
   subtopicsLoading.value = true
@@ -376,10 +659,14 @@ async function editQuestionRecord(record) {
     editingQuestionId.value = current.id
     contextLocked.value = false
     const answers = Array.isArray(current.correct_answer) ? current.correct_answer : [current.correct_answer].filter(Boolean)
+    const bowTieAnswers = current.correct_answer && !Array.isArray(current.correct_answer) ? current.correct_answer : {}
     const options = Array.isArray(current.options) ? current.options : []
+    const highlightOptions = current.options?.highlight_targets
+    const highlightAnswers = Array.isArray(current.correct_answer) ? current.correct_answer.map(String) : []
     questionDraft.value = {
       ...blankQuestionDraft(type), subtopicId: String(current.subtopic_id ?? ''),
       premadeExamId: current.premade_exam_id ? String(current.premade_exam_id) : '',
+      topicId: current.topic_id ? String(current.topic_id) : '',
       questionIntro: current.question_intro || '', prompt: current.question_text || '',
       answer: getQuestionTypeLayout(type.code).correctAnswerMode === 'text' ? String(answers[0] ?? '') : '',
       choices: options.map((option, index) => ({
@@ -388,7 +675,34 @@ async function editQuestionRecord(record) {
         rationale: option.rationale || '',
         correct: option.is_correct === true || Number(option.is_correct) === 1 || answers.includes(String(option.label ?? option.option_label ?? option.id ?? String.fromCharCode(65 + index))),
       })),
-      tabs: Array.isArray(current.tabs) ? JSON.stringify(current.tabs, null, 2) : '', unit: current.unit || '',
+      ...(getQuestionTypeLayout(type.code).layout === 'bowTie' ? {
+        bowTie: {
+          conditionOptions: normalizeBowTieOptions(current.options?.condition_options, 'c', bowTieAnswers.condition),
+          actionOptions: normalizeBowTieOptions(current.options?.action_options, 'a', bowTieAnswers.actions),
+          monitorOptions: normalizeBowTieOptions(current.options?.monitor_options, 'm', bowTieAnswers.monitor),
+        },
+      } : {}),
+      ...(getQuestionTypeLayout(type.code).layout === 'matrixMultipleResponse' ? {
+        matrixRows: normalizeMatrixRows(current.options, current.correct_answer),
+      } : {}),
+      ...(getQuestionTypeLayout(type.code).layout === 'matrixClassification' ? (() => {
+        const classification = normalizeMatrixClassification(current.options, current.correct_answer)
+        return {
+          matrixClassificationColumns: classification.columns,
+          matrixClassificationRows: classification.rows,
+        }
+      })() : {}),
+      ...(getQuestionTypeLayout(type.code).layout === 'dropdown' ? {
+        dropdowns: normalizeDropdowns(current.options, current.correct_answer),
+      } : {}),
+      ...(getQuestionTypeLayout(type.code).layout === 'highlight' ? {
+        highlightTargets: Array.isArray(highlightOptions) ? highlightOptions.map(target => ({
+          id: String(target?.id ?? `h${nextHighlightId++}`),
+          text: String(target?.text ?? ''),
+          correct: highlightAnswers.includes(String(target?.id ?? '')),
+        })) : [],
+      } : {}),
+      tabs: normalizeDraftTabs(current.tabs), unit: current.unit || '',
       difficulty: current.difficulty || 'medium', points: current.points ?? 1,
       explanation: current.explanation ?? current.explanation_text ?? current.full_explanation ?? '',
       status: current.status || 'draft', displayOrder: current.display_order ?? 0,
@@ -396,6 +710,7 @@ async function editQuestionRecord(record) {
     questionDrafts.value[type.code] = questionDraft.value
     if (current.subtopic_id) sessionContext.value.subtopicId = String(current.subtopic_id)
     if (current.premade_exam_id) sessionContext.value.premadeExamId = String(current.premade_exam_id)
+    if (current.topic_id) sessionContext.value.topicId = String(current.topic_id)
   } catch (error) {
     questionPayloadError.value = error.message || 'The question could not be loaded.'
   }
@@ -417,9 +732,17 @@ function routeToQuestion(type, addHistory = true) {
   editingQuestionId.value = null
   lastQuestionPayload.value = null
   questionPayloadError.value = ''
-  questionDraft.value = questionDrafts.value[type.code] || blankQuestionDraft(type)
+  questionDraft.value = {
+    ...blankQuestionDraft(type),
+    ...(questionDrafts.value[type.code] || {}),
+  }
+  questionDraft.value.tabs = normalizeDraftTabs(questionDraft.value.tabs)
+  if (getQuestionTypeLayout(type.code).layout === 'highlight' && !Array.isArray(questionDraft.value.highlightTargets)) {
+    questionDraft.value.highlightTargets = []
+  }
   if (sessionContext.value.subtopicId) questionDraft.value.subtopicId = sessionContext.value.subtopicId
   if (sessionContext.value.premadeExamId) questionDraft.value.premadeExamId = sessionContext.value.premadeExamId
+  if (sessionContext.value.topicId) questionDraft.value.topicId = sessionContext.value.topicId
   if (addHistory) window.history.pushState({ questionType: type.code }, '', `?page=question&type=${encodeURIComponent(type.code)}`)
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
@@ -456,15 +779,37 @@ function setCorrect(choice, isCorrect) {
     questionDraft.value.choices.forEach(item => { item.correct = item.id === choice.id })
   } else choice.correct = isCorrect
 }
+function addQuestionTab() {
+  questionDraft.value.tabs.push({ id: nextTabId++, title: '', content: '' })
+}
+function removeQuestionTab(tabId) {
+  questionDraft.value.tabs = questionDraft.value.tabs.filter(tab => tab.id !== tabId)
+}
+function setTabEditorRef(tabId, editor) {
+  if (editor) tabEditors.value[tabId] = editor
+  else delete tabEditors.value[tabId]
+}
+function insertExhibitPlaceholder() {
+  introEditor.value?.syncContent()
+  const marker = '<exhibit-placeholder></exhibit-placeholder>'
+  const intro = questionDraft.value.questionIntro || ''
+  if (!intro.includes(marker)) questionDraft.value.questionIntro = `${intro}${intro ? '\n' : ''}${marker}`
+}
 function updateSessionContext(field, value) {
   if (contextLocked.value) return
   sessionContext.value[field] = value
   questionDraft.value[field] = value
+  if (field === 'premadeExamId' && questionDraft.value.topicId
+    && !questionTopicOptions.value.some(item => item.value === String(questionDraft.value.topicId))) {
+    questionDraft.value.topicId = ''
+    sessionContext.value.topicId = ''
+  }
 }
 function lockQuestionContext() {
   if (!questionDraft.value.subtopicId && !questionDraft.value.premadeExamId) return
   sessionContext.value.subtopicId = questionDraft.value.subtopicId
   sessionContext.value.premadeExamId = questionDraft.value.premadeExamId
+  sessionContext.value.topicId = questionDraft.value.topicId
   contextLocked.value = true
   toast.value = 'Question context locked for this session'
   window.setTimeout(() => toast.value = '', 2400)
@@ -798,47 +1143,206 @@ function scheduleRationaleAutoImport() {
 }
 async function saveQuestionContent() {
   questionPayloadError.value = ''
+  introEditor.value?.syncContent()
+  promptEditor.value?.syncContent()
   explanationEditor.value?.syncContent()
+  Object.values(tabEditors.value).forEach(editor => editor?.syncContent())
   const draft = questionDraft.value
   const fullExplanation = [draft.explanation, draft.fullExplanation, draft.explanation_text]
     .find(value => typeof value === 'string' && value.trim()) || null
   if (!draft.subtopicId && !draft.premadeExamId) { questionPayloadError.value = 'Select a subtopic or premade exam before saving this question.'; return }
   if (!draft.prompt.trim()) { questionPayloadError.value = 'Enter the question before building the payload.'; return }
   if (questionLayout.value.correctAnswerMode === 'text' && !draft.answer.trim()) { questionPayloadError.value = 'Enter the accepted answer before building the payload.'; return }
-  let tabs = null
-  if (questionLayout.value.supportsTabs && draft.tabs.trim()) {
-    try {
-      tabs = JSON.parse(draft.tabs)
-    } catch {
-      questionPayloadError.value = 'Tabs must be valid JSON in an array of { title, content } objects.'
-      return
-    }
-    if (!Array.isArray(tabs) || tabs.some(tab => !tab || typeof tab.title !== 'string' || typeof tab.content !== 'string')) {
-      questionPayloadError.value = 'Tabs must be an array of objects with string title and content fields.'
-      return
-    }
+  const dropdowns = isDropdown.value ? draft.dropdowns.map(dropdown => ({
+    ...dropdown,
+    options: dropdown.options.map((option, index) => ({
+      ...option,
+      id: matrixOptionId(index),
+      text: option.text.trim(),
+    })).filter(option => option.text),
+  })) : null
+  const promptDropdownIds = [...draft.prompt.matchAll(/data-dropdown-id=["']([^"']+)["']/g)]
+    .map(match => match[1])
+  if (isDropdown.value && (
+    !dropdowns.length
+    || new Set(promptDropdownIds).size !== promptDropdownIds.length
+    || promptDropdownIds.length !== dropdowns.length
+    || new Set(dropdowns.map(dropdown => dropdown.id)).size !== dropdowns.length
+    || dropdowns.some(dropdown => !promptDropdownIds.includes(dropdown.id)
+      || dropdown.options.length < 2
+      || dropdown.options.filter(option => option.correct).length !== 1)
+    || dropdowns.some(dropdown => {
+      const optionTexts = dropdown.options.map(option => option.text.toLowerCase())
+      return new Set(optionTexts).size !== optionTexts.length
+    })
+  )) {
+    questionPayloadError.value = 'Insert at least one select placeholder. For each select, add at least two different options and mark exactly one correct answer.'
+    return
   }
+  const bowTieGroups = isBowTie.value ? {
+    conditionOptions: draft.bowTie.conditionOptions.filter(option => option.text.trim()),
+    actionOptions: draft.bowTie.actionOptions.filter(option => option.text.trim()),
+    monitorOptions: draft.bowTie.monitorOptions.filter(option => option.text.trim()),
+  } : null
+  if (isBowTie.value && (
+    !bowTieGroups.conditionOptions.some(option => option.correct)
+    || !bowTieGroups.actionOptions.some(option => option.correct)
+    || !bowTieGroups.monitorOptions.some(option => option.correct)
+    || !bowTieGroups.conditionOptions.length
+    || !bowTieGroups.actionOptions.length
+    || !bowTieGroups.monitorOptions.length
+  )) {
+    questionPayloadError.value = 'Add options and mark at least one correct answer in the condition, actions, and monitoring groups.'
+    return
+  }
+  const matrixRows = isMatrixMultipleResponse.value ? draft.matrixRows.map(row => ({
+    ...row,
+    key: matrixRowKey(row.label),
+    options: row.options.map((option, index) => ({ ...option, id: matrixOptionId(index) }))
+      .filter(option => option.text.trim()),
+  })) : null
+  if (isMatrixMultipleResponse.value && (
+    !matrixRows.length
+    || matrixRows.some(row => !row.label.trim() || !row.key || row.options.length === 0
+      || !row.options.some(option => option.correct))
+    || new Set(matrixRows.map(row => row.key)).size !== matrixRows.length
+  )) {
+    questionPayloadError.value = 'Each matrix row needs a unique label, at least one response option, and at least one correct response.'
+    return
+  }
+  const matrixClassificationColumns = isMatrixClassification.value
+    ? draft.matrixClassificationColumns.map((column, index) => ({
+      ...column,
+      answerId: matrixOptionId(index),
+      label: column.label.trim(),
+    }))
+    : null
+  const matrixClassificationRows = isMatrixClassification.value
+    ? draft.matrixClassificationRows.map(row => ({
+      ...row,
+      key: matrixRowKey(row.label),
+      label: row.label.trim(),
+      selectedColumnIds: row.selectedColumnIds.filter(id =>
+        draft.matrixClassificationColumns.some(column => column.id === id)),
+    }))
+    : null
+  if (isMatrixClassification.value && (
+    matrixClassificationColumns.length < 2
+    || matrixClassificationColumns.some(column => !column.label)
+    || new Set(matrixClassificationColumns.map(column => column.label.toLowerCase())).size
+      !== matrixClassificationColumns.length
+    || !matrixClassificationRows.length
+    || matrixClassificationRows.some(row => !row.label || !row.key)
+    || new Set(matrixClassificationRows.map(row => row.key)).size !== matrixClassificationRows.length
+    || matrixClassificationColumns.some(column => !matrixClassificationRows.some(row =>
+      row.selectedColumnIds.includes(column.id)))
+  )) {
+    questionPayloadError.value = 'Add at least two uniquely named classification columns and uniquely named findings, then select each classification in at least one finding.'
+    return
+  }
+  const highlightTargets = isHighlight.value ? draft.highlightTargets : null
+  if (isHighlight.value && (
+    !highlightTargets.length
+    || !highlightTargets.some(target => target.correct)
+    || highlightTargets.some(target => !target.text.trim())
+  )) {
+    questionPayloadError.value = 'Mark at least one passage selection as a highlight target and choose at least one correct target.'
+    return
+  }
+  const tabs = draft.tabs.length
+    ? draft.tabs.map(({ title, content }) => ({ title, content }))
+    : null
   const populatedChoices = draft.choices.map((choice, index) => ({
     id: String.fromCharCode(65 + index),
     text: choice.option.trim(),
     rationale: choice.rationale || '',
     correct: choice.correct,
   })).filter(choice => htmlText(choice.text))
+  const bowTieOptions = bowTieGroups ? {
+    condition_options: bowTieGroups.conditionOptions.map(({ id, text }) => ({ id, text: text.trim() })),
+    action_options: bowTieGroups.actionOptions.map(({ id, text }) => ({ id, text: text.trim() })),
+    monitor_options: bowTieGroups.monitorOptions.map(({ id, text }) => ({ id, text: text.trim() })),
+    labels: {
+      condition: 'Potential condition',
+      actions: 'Actions to take',
+      monitor: 'Parameters to monitor',
+    },
+  } : null
+  const bowTieCorrectAnswer = bowTieGroups ? {
+    condition: bowTieGroups.conditionOptions.filter(option => option.correct).map(option => option.id),
+    actions: bowTieGroups.actionOptions.filter(option => option.correct).map(option => option.id),
+    monitor: bowTieGroups.monitorOptions.filter(option => option.correct).map(option => option.id),
+  } : null
+  const matrixOptions = matrixRows ? Object.fromEntries(matrixRows.map(row => [row.key, {
+    label: row.label.trim(),
+    options: row.options.map(({ id, text }) => ({ id, text: text.trim() })),
+  }])) : null
+  const matrixCorrectAnswer = matrixRows ? Object.fromEntries(matrixRows.map(row => [row.key, {
+    answers: row.options.filter(option => option.correct).map(option => option.id).join(','),
+  }])) : null
+  const matrixClassificationOptions = matrixClassificationRows ? Object.fromEntries(
+    matrixClassificationRows.map(row => [row.key, {
+      label: row.label,
+      options: matrixClassificationColumns.map(column => ({
+        id: column.answerId,
+        text: column.label,
+      })),
+    }]),
+  ) : null
+  const matrixClassificationCorrectAnswer = matrixClassificationRows
+    ? Object.fromEntries(matrixClassificationRows.map(row => [row.key, {
+      answers: matrixClassificationColumns
+        .filter(column => row.selectedColumnIds.includes(column.id))
+        .map(column => column.answerId)
+        .join(','),
+    }]))
+    : null
+  const dropdownOptions = dropdowns ? {
+    dropdowns: dropdowns.map(({ id, label, options }) => ({
+      id,
+      label,
+      options: options.map(({ id: optionId, text }) => ({ id: optionId, text })),
+    })),
+  } : null
+  const dropdownCorrectAnswer = dropdowns
+    ? Object.fromEntries(dropdowns.map(dropdown => [
+      dropdown.id,
+      dropdown.options.find(option => option.correct)?.id,
+    ]))
+    : null
+  const highlightOptions = highlightTargets ? {
+    highlight_targets: highlightTargets.map(({ id, text }) => ({ id, text })),
+  } : null
+  const highlightCorrectAnswer = highlightTargets
+    ? highlightTargets.filter(target => target.correct).map(target => target.id)
+    : null
   const payload = {
     subtopic_id: draft.subtopicId ? Number(draft.subtopicId) : null,
     premade_exam_id: draft.premadeExamId ? Number(draft.premadeExamId) : null,
+    topic_id: draft.topicId ? Number(draft.topicId) : null,
     question_type_id: Number(questionPage.value.id),
     question_intro: draft.questionIntro || null,
     question_text: draft.prompt,
-    options: questionLayout.value.optionsPayload === 'choices' ? populatedChoices.map(({ id, text, rationale, correct }, index) => ({
-      label: id,
-      option_label: id,
-      option_text: text,
-      is_correct: correct,
-      display_order: index,
-      ...(rationale ? { rationale } : {}),
-    })) : null,
-    correct_answer: questionLayout.value.correctAnswerPayload === 'textArray' ? [draft.answer.trim()] : populatedChoices.filter(choice => choice.correct).map(choice => choice.id),
+    options: questionLayout.value.optionsPayload === 'highlightTargets' ? highlightOptions
+      : questionLayout.value.optionsPayload === 'matrixMultipleResponse' ? matrixOptions
+      : questionLayout.value.optionsPayload === 'matrixClassification' ? matrixClassificationOptions
+      : questionLayout.value.optionsPayload === 'dropdowns' ? dropdownOptions
+      : questionLayout.value.optionsPayload === 'bowTie' ? bowTieOptions
+      : questionLayout.value.optionsPayload === 'choices' ? populatedChoices.map(({ id, text, rationale, correct }, index) => ({
+        label: id,
+        option_label: id,
+        option_text: text,
+        is_correct: correct,
+        display_order: index,
+        ...(rationale ? { rationale } : {}),
+      })) : null,
+    correct_answer: questionLayout.value.correctAnswerPayload === 'highlightIds' ? highlightCorrectAnswer
+      : questionLayout.value.correctAnswerPayload === 'matrixMultipleResponse' ? matrixCorrectAnswer
+      : questionLayout.value.correctAnswerPayload === 'matrixClassification' ? matrixClassificationCorrectAnswer
+      : questionLayout.value.correctAnswerPayload === 'dropdowns' ? dropdownCorrectAnswer
+      : questionLayout.value.correctAnswerPayload === 'bowTie' ? bowTieCorrectAnswer
+      : questionLayout.value.correctAnswerPayload === 'textArray' ? [draft.answer.trim()]
+        : populatedChoices.filter(choice => choice.correct).map(choice => choice.id),
     tabs,
     unit: draft.unit.trim() || null,
     difficulty: draft.difficulty,
@@ -847,10 +1351,18 @@ async function saveQuestionContent() {
     status: draft.status,
     display_order: Number(draft.displayOrder),
   }
+  if (isMatrixMultipleResponse.value || isMatrixClassification.value) {
+    delete payload.tabs
+    delete payload.unit
+    delete payload.status
+    delete payload.display_order
+    payload.is_active = draft.status === 'active'
+  }
   const isEditing = Boolean(editingQuestionId.value)
   const preservedMetadata = {
     subtopicId: draft.subtopicId,
     premadeExamId: draft.premadeExamId,
+    topicId: draft.topicId,
     difficulty: draft.difficulty,
     points: draft.points,
     status: draft.status,
@@ -959,12 +1471,14 @@ function changeExamSubject(subjectId) {
   examForm.value.topic_id = ''
 }
 async function saveExam() {
-  if (!examForm.value.product_id || !examForm.value.subject_id || (requiresNursingCategory.value && !examForm.value.nursing_category_id) || !examForm.value.topic_id || !examForm.value.name.trim() || !examForm.value.slug.trim()) return
+  if (!examForm.value.product_id || !examForm.value.subject_id || (requiresNursingCategory.value && !examForm.value.nursing_category_id) || !examForm.value.name.trim() || !examForm.value.slug.trim()) return
   premadeExamSaveError.value = ''
   premadeExamSaving.value = true
   const payload = {
+    product_id: Number(examForm.value.product_id),
+    subject_id: Number(examForm.value.subject_id),
     nursing_category_id: requiresNursingCategory.value ? Number(examForm.value.nursing_category_id) : null,
-    topic_id: Number(examForm.value.topic_id),
+    topic_id: examForm.value.topic_id ? Number(examForm.value.topic_id) : null,
     name: examForm.value.name.trim(),
     slug: examForm.value.slug.trim(),
     short_description: examForm.value.short_description || null,
@@ -1018,7 +1532,7 @@ async function removeExam(exam) {
   }
 }
 function categoryName(id) { return nursingCategories.value.find(item => String(item.id) === String(id))?.name || `Category ${id}` }
-function topicName(id) { return topics.value.find(item => String(item.id) === String(id))?.name || `Topic ${id}` }
+function topicName(id) { return id ? topics.value.find(item => String(item.id) === String(id))?.name || `Topic ${id}` : 'Topic not set' }
 function productName(id) { return products.value.find(item => String(item.id ?? item.product_id) === String(id))?.name || 'Product not set' }
 function subjectName(id) { return subjects.value.find(item => String(item.id ?? item.subject_id) === String(id))?.name || 'Subject not set' }
 function questionTypeName(id) { return questions.value.find(item => String(item.id) === String(id))?.name || `Type ${id}` }
@@ -1141,12 +1655,12 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
         <div class="flex items-center gap-4"><button class="icon-button relative" aria-label="Notifications"><svg viewBox="0 0 24 24"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span class="notification-dot"></span></button><div class="hidden h-8 w-px bg-slate-200 sm:block"></div><div class="avatar">{{ profileInitials }}</div><button class="text-xs font-semibold text-slate-500 hover:text-indigo-600" @click="logout">Sign out</button></div>
       </header>
       <div class="mx-auto max-w-[1440px] px-5 pb-12 pt-8 sm:px-8 sm:pt-10 xl:px-12">
-        <div class="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><div class="mb-2 flex items-center gap-2"><span class="eyebrow-dot"></span><span class="eyebrow">ASSESSMENT LIBRARY</span></div><h1 class="font-display text-[29px] font-extrabold tracking-[-.04em] text-slate-900 sm:text-[34px]">Premade exams</h1><p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Create and organize ready-made nursing exams by category and topic.</p></div><button class="primary-button" @click="openNewExam"><span class="text-lg leading-none">+</span> Create premade exam</button></div>
-        <section class="stats-grid mb-7 grid gap-4 sm:grid-cols-3"><div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></div><div><p class="stat-label">PREMADE EXAMS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ premadeExams.length }}</span><span class="stat-change">in your library</span></div></div></div><div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></div><div><p class="stat-label">ACTIVE EXAMS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ premadeExams.filter(item => item.status === 'active').length }}</span><span class="stat-change">ready to assign</span></div></div></div><div class="stat-card"><div class="stat-icon orange"><svg viewBox="0 0 24 24"><path d="M4 19V5m0 14h17M8 15l3-4 3 2 5-7"/></svg></div><div><p class="stat-label">LINKED TOPICS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ new Set(premadeExams.map(item => item.topic_id)).size }}</span><span class="stat-change">covered by exams</span></div></div></div></section>
-        <section class="content-panel overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_2px_12px_rgba(35,54,86,.025)]"><div class="panel-heading flex flex-col justify-between gap-4 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:px-6"><div><h2 class="font-display text-[16px] font-bold text-slate-900">Exam library</h2><p class="mt-1 text-xs text-slate-400">Premade exams linked to nursing categories and topics</p></div><span class="code-badge">{{ premadeExams.length }} total</span></div>
+        <div class="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><div class="mb-2 flex items-center gap-2"><span class="eyebrow-dot"></span><span class="eyebrow">ASSESSMENT LIBRARY</span></div><h1 class="font-display text-[29px] font-extrabold tracking-[-.04em] text-slate-900 sm:text-[34px]">Premade exams</h1><p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Create and organize ready-made nursing exams by category, with optional topics on individual questions.</p></div><button class="primary-button" @click="openNewExam"><span class="text-lg leading-none">+</span> Create premade exam</button></div>
+        <section class="stats-grid mb-7 grid gap-4 sm:grid-cols-3"><div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></div><div><p class="stat-label">PREMADE EXAMS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ premadeExams.length }}</span><span class="stat-change">in your library</span></div></div></div><div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></div><div><p class="stat-label">ACTIVE EXAMS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ premadeExams.filter(item => item.status === 'active').length }}</span><span class="stat-change">ready to assign</span></div></div></div><div class="stat-card"><div class="stat-icon orange"><svg viewBox="0 0 24 24"><path d="M4 19V5m0 14h17M8 15l3-4 3 2 5-7"/></svg></div><div><p class="stat-label">QUESTION TOPICS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ new Set(questionRecords.map(item => questionTopicId(item)).filter(Boolean)).size }}</span><span class="stat-change">used by questions</span></div></div></div></section>
+        <section class="content-panel overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_2px_12px_rgba(35,54,86,.025)]"><div class="panel-heading flex flex-col justify-between gap-4 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:px-6"><div><h2 class="font-display text-[16px] font-bold text-slate-900">Exam library</h2><p class="mt-1 text-xs text-slate-400">Premade exams linked to nursing categories; topic is optional for mixed-topic exams</p></div><span class="code-badge">{{ premadeExams.length }} total</span></div>
           <div v-if="taxonomyError" class="mx-5 mt-4 rounded-lg border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-800 sm:mx-6">{{ taxonomyError }} <span class="ml-1 text-amber-700">({{ CATEGORIES_ENDPOINT }}, {{ TOPICS_ENDPOINT }})</span></div>
           <div class="table-scroll"><table class="w-full border-collapse text-left"><thead><tr><th>EXAM</th><th>CATEGORY / TOPIC</th><th>CODE / SLUG</th><th>QUESTIONS</th><th>STATUS</th><th class="text-right">ACTIONS</th></tr></thead><tbody><tr v-for="exam in premadeExams" :key="exam.id" class="question-row"><td><p class="text-[13px] font-bold text-slate-800">{{ exam.name }}</p><p class="mt-1 max-w-[280px] truncate text-[11px] text-slate-400">{{ plain(exam.short_description) || 'No short description' }}</p><p class="mt-1 text-[10px] text-slate-400">{{ productName(exam.product_id) }} · {{ subjectName(exam.subject_id) }}</p></td><td><p class="text-xs font-semibold text-slate-700">{{ categoryName(exam.nursing_category_id) }}</p><p class="mt-1 text-[11px] text-slate-400">{{ topicName(exam.topic_id) }}</p></td><td><span class="code-badge">{{ exam.code }}</span><p class="mt-1 text-[10px] text-slate-400">{{ exam.slug }}</p></td><td><span class="text-xs font-semibold text-slate-700">{{ exam.question_count }}</span></td><td><span class="exam-status" :class="'exam-'+exam.status">{{ exam.status }}</span></td><td><div class="flex justify-end gap-1"><button class="row-action" title="Edit exam" @click="editExam(exam)"><svg viewBox="0 0 24 24"><path d="m14 5 5 5M4 20l4.5-1 10.8-10.8a2.1 2.1 0 0 0-3-3L5.5 16 4 20Z"/></svg></button><button class="row-action danger" title="Delete exam" @click="removeExam(exam)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M5 7l1 13h12l1-13M9 7V4h6v3"/></svg></button></div></td></tr>
-            <tr v-if="premadeExams.length === 0"><td colspan="6" class="empty-state"><div class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-50 text-xl text-slate-400">▣</div><p class="font-bold text-slate-700">No premade exams yet</p><p class="mt-1 text-xs text-slate-400">Create an exam and link it to a nursing category and topic.</p><button class="mt-4 text-xs font-bold text-indigo-600" @click="openNewExam">Create your first exam →</button></td></tr>
+            <tr v-if="premadeExams.length === 0"><td colspan="6" class="empty-state"><div class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-50 text-xl text-slate-400">▣</div><p class="font-bold text-slate-700">No premade exams yet</p><p class="mt-1 text-xs text-slate-400">Create an exam and link it to a nursing category.</p><button class="mt-4 text-xs font-bold text-indigo-600" @click="openNewExam">Create your first exam →</button></td></tr>
           </tbody></table></div>
           <div class="border-t border-slate-100 px-5 py-4 text-xs text-slate-400 sm:px-6">Showing {{ premadeExams.length }} premade exam{{ premadeExams.length === 1 ? '' : 's' }}</div>
         </section>
@@ -1167,6 +1681,7 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
             <div class="question-meta-grid">
               <label class="form-field"><span>Subtopic <b v-if="subtopicRequired">*</b><small v-else>Optional when a premade exam is locked</small></span><SearchableSelect v-model="questionDraft.subtopicId" :options="subtopicOptions" :disabled="subtopicsLoading || contextLocked" :placeholder="subtopicRequired ? 'Select a subtopic' : 'Optional · exam context is locked'" @change="updateSessionContext('subtopicId', $event)"/><small v-if="subtopicsError" class="field-error">{{ subtopicsError }} Endpoint: {{ SUBTOPICS_ENDPOINT }}</small></label>
               <label class="form-field"><span>Premade exam <small>Optional</small></span><SearchableSelect v-model="questionDraft.premadeExamId" :options="premadeExamSelectOptions" :disabled="premadeExamsLoading || contextLocked" placeholder="No premade exam" @change="updateSessionContext('premadeExamId', $event)"/><small v-if="premadeExamsLoading" class="field-hint">Loading premade exams…</small><small v-else-if="premadeExamsError" class="field-error">{{ premadeExamsError }} Endpoint: {{ QUESTION_EXAMS_ENDPOINT }}</small></label>
+              <label class="form-field"><span>Topic <small>Optional</small></span><SearchableSelect :key="`${questionDraft.premadeExamId}:${selectedQuestionExamSubjectId ?? ''}`" v-model="questionDraft.topicId" :options="questionTopicOptions" :disabled="taxonomyLoading || contextLocked" placeholder="No question topic" @change="updateSessionContext('topicId', $event)"/></label>
               <label class="form-field"><span>Question type</span><input :value="`${questionPage.name} · ID ${questionPage.id}`" readonly /></label>
               <label class="form-field"><span>Difficulty</span><SearchableSelect v-model="questionDraft.difficulty" :options="['easy', 'medium', 'hard']" placeholder="Select difficulty"/></label>
               <label class="form-field"><span>Points</span><input v-model="questionDraft.points" type="number" min="0" step="0.01" required /></label>
@@ -1188,11 +1703,114 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
               <p v-if="rationaleImportError" class="field-error word-import-feedback">{{ rationaleImportError }}</p>
               <p v-if="rationaleImportMessage" class="word-import-success">{{ rationaleImportMessage }}</p>
             </div>
-            <label v-if="questionLayout.supportsTabs" class="form-field tabs-field"><span>Tabs <small>Optional JSON array of objects with title and content</small></span><textarea v-model="questionDraft.tabs" rows="3" placeholder='[{"title":"Assessment","content":"The patient’s vital signs are..."}]'></textarea></label>
           </section>
-          <section class="builder-section"><div class="section-heading"><span class="section-number">02</span><div><h2>Question introduction <span class="optional-tag">Optional</span></h2><p>Add shared context, a clinical scenario, or instructions shown before the question.</p></div></div><div class="question-editor"><RichEditor :key="`${questionPage.code}-intro`" v-model="questionDraft.questionIntro" :height="130" /></div></section>
-          <section class="builder-section"><div class="section-heading"><span class="section-number">03</span><div><h2>Question</h2><p>Paste or write the question learners will answer.</p></div></div><div class="question-editor"><RichEditor :key="`${questionPage.code}-prompt`" v-model="questionDraft.prompt" :height="190" /></div></section>
+          <section class="builder-section"><div class="section-heading"><span class="section-number">02</span><div><h2>Question introduction <span class="optional-tag">Optional</span></h2><p>Add shared context, a clinical scenario, or instructions shown before the question.</p></div></div><div class="question-editor"><RichEditor ref="introEditor" :key="`${questionPage.code}-intro`" v-model="questionDraft.questionIntro" :height="130" /></div><div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" class="context-lock-button" @click="insertExhibitPlaceholder">Insert exhibit placeholder</button><span class="text-[11px] text-slate-400">Adds the exhibit marker below the introduction.</span></div></section>
+          <section class="builder-section"><div class="section-heading"><span class="section-number">T</span><div><h2>Question tabs <span class="optional-tag">Optional</span></h2><p>Add titled content panels for exhibits or supporting information.</p></div></div>
+            <div v-if="questionDraft.tabs.length" class="space-y-4">
+              <article v-for="(tab, index) in questionDraft.tabs" :key="tab.id" class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                <div class="mb-4 flex items-center justify-between gap-3"><h3 class="text-sm font-semibold text-slate-700">Tab {{ index + 1 }}</h3><button type="button" class="remove-choice" @click="removeQuestionTab(tab.id)">Remove tab</button></div>
+                <label class="form-field"><span>Title</span><input v-model="tab.title" class="choice-input" placeholder="e.g. Assessment" /></label>
+                <label class="form-field mt-4"><span>Content</span><RichEditor :ref="editor => setTabEditorRef(tab.id, editor)" :key="`${questionPage.code}-tab-${tab.id}`" v-model="tab.content" :height="150" /></label>
+              </article>
+              <button type="button" class="context-lock-button" @click="addQuestionTab">Add another tab</button>
+            </div>
+            <button v-else type="button" class="context-lock-button" @click="addQuestionTab">Add tabs</button>
+          </section>
+          <section class="builder-section"><div class="section-heading"><span class="section-number">03</span><div><h2>{{ isHighlight ? 'Passage to highlight' : 'Question' }}</h2><p>{{ isHighlight ? 'Write or paste the passage, then select text and mark it as a highlight target.' : 'Paste or write the question learners will answer.' }}</p></div></div><div class="question-editor"><RichEditor ref="promptEditor" :key="`${questionPage.code}-prompt`" v-model="questionDraft.prompt" :height="190" /></div>
+            <div v-if="isDropdown" class="mt-3 space-y-3">
+              <button type="button" class="context-lock-button" @click="addDropdown">Insert “select”</button>
+              <p class="text-[11px] text-slate-500">Place the cursor in the question above, then insert a select where the learner should choose an answer.</p>
+            </div>
+            <div v-if="isHighlight" class="mt-3 space-y-4">
+              <button type="button" class="context-lock-button" @click="addHighlightTarget">Mark selected text as a target</button>
+              <p class="text-[11px] text-slate-500">Select text in the passage first. Targets remain embedded in the rich text as stable highlight IDs.</p>
+              <div v-if="questionDraft.highlightTargets.length" class="space-y-2">
+                <div v-for="target in questionDraft.highlightTargets" :key="target.id" class="flex items-center gap-3 rounded-lg border border-slate-200 px-3 py-2">
+                  <code class="code-badge">{{ target.id }}</code>
+                  <span class="min-w-0 flex-1 text-sm text-slate-700">{{ target.text }}</span>
+                  <label class="correct-choice shrink-0"><input v-model="target.correct" type="checkbox" :name="`highlight-${questionPage.code}`"/><span>Correct target</span></label>
+                  <button type="button" class="remove-choice" :aria-label="`Remove highlight target ${target.id}`" @click="removeHighlightTarget(target)">Remove</button>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section v-if="isDropdown" class="builder-section choices-section">
+            <div class="section-heading"><span class="section-number">04</span><div><h2>Dropdown choices</h2><p>Add the available choices and mark one correct answer for each select in the question.</p></div></div>
+            <div v-if="questionDraft.dropdowns.length" class="space-y-5">
+              <article v-for="dropdown in questionDraft.dropdowns" :key="dropdown.id" class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                <div class="mb-4 flex items-center justify-between gap-3"><h3 class="text-sm font-semibold text-slate-700">{{ dropdown.label }} choices</h3><button type="button" class="remove-choice" @click="removeDropdown(dropdown)">Remove select</button></div>
+                <div class="space-y-3">
+                  <div v-for="option in dropdown.options" :key="option.id" class="flex items-center gap-3">
+                    <span class="code-badge">{{ option.id }}</span>
+                    <input v-model="option.text" class="choice-input min-w-0 flex-1" placeholder="Enter a dropdown choice" />
+                    <label class="correct-choice shrink-0"><input :checked="option.correct" type="radio" :name="`correct-${questionPage.code}-${dropdown.id}`" @change="setDropdownCorrect(dropdown, option)" /><span>Correct answer</span></label>
+                    <button v-if="dropdown.options.length > 2" type="button" class="remove-choice" :aria-label="`Remove option ${option.id} from ${dropdown.label}`" @click="removeDropdownOption(dropdown, option.id)">Remove</button>
+                  </div>
+                </div>
+                <button type="button" class="add-choice-button mt-3" @click="addDropdownOption(dropdown)"><span>+</span> Add option</button>
+              </article>
+            </div>
+            <p v-else class="text-sm text-slate-500">Insert a “select” placeholder into the question to add its choices here.</p>
+          </section>
           <section v-if="isFillBlank" class="builder-section fill-blank-answer-section"><div class="section-heading"><span class="section-number">04</span><div><h2>Answer</h2><p>Enter the expected word, phrase, or value for the blank.</p></div></div><label class="form-field"><span>Accepted answer <b>*</b></span><input v-model="questionDraft.answer" class="choice-input" placeholder="Enter the correct answer" required /></label><label class="form-field fill-blank-unit"><span>Unit <small>Optional · choose a common unit or enter your own</small></span><input v-model="questionDraft.unit" class="choice-input" placeholder="e.g. mg, mL, bpm, tablet(s)" /><span class="unit-shortcuts"><button v-for="unit in commonUnits" :key="unit" type="button" class="unit-chip" :class="{ selected: questionDraft.unit === unit }" @click="setQuestionUnit(unit)">{{ unit }}</button></span></label></section>
+          <section v-if="isBowTie" class="builder-section choices-section"><div class="section-heading"><span class="section-number">04</span><div><h2>Bow-tie answer options</h2><p>Add possible conditions, actions, and monitoring parameters, then select the correct answer or answers in each group.</p></div></div>
+            <div class="space-y-5">
+              <article v-for="group in bowTieChoiceGroups" :key="group.key" class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                <h3 class="mb-3 text-sm font-semibold text-slate-700">{{ group.title }}</h3>
+                <div class="space-y-3">
+                  <div v-for="option in questionDraft.bowTie[group.key]" :key="option.id" class="flex items-center gap-3">
+                    <input v-model="option.text" class="choice-input min-w-0 flex-1" :placeholder="`${group.title} option`" />
+                    <label class="correct-choice shrink-0"><input :checked="option.correct" :type="group.key === 'conditionOptions' ? 'radio' : 'checkbox'" :name="`bowtie-${group.key}`" @change="setBowTieCorrect(group.key, option, $event.target.checked)"/><span>{{ group.correctLabel }}</span></label>
+                    <button type="button" class="remove-choice" :aria-label="`Remove ${group.title} option`" @click="removeBowTieOption(group.key, option.id)">Remove</button>
+                  </div>
+                </div>
+                <button type="button" class="add-choice-button mt-3" @click="addBowTieOption(group.key)"><span>+</span> Add option</button>
+              </article>
+            </div>
+          </section>
+          <section v-if="isMatrixMultipleResponse" class="builder-section choices-section"><div class="section-heading"><span class="section-number">04</span><div><h2>Matrix rows and responses</h2><p>Add each manifestation and its response options, then mark every correct response for that row.</p></div></div>
+            <div class="space-y-5">
+              <article v-for="(row, rowIndex) in questionDraft.matrixRows" :key="row.id" class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                <div class="mb-4 flex items-center justify-between gap-3"><h3 class="text-sm font-semibold text-slate-700">Manifestation {{ rowIndex + 1 }}</h3><button type="button" class="remove-choice" @click="removeMatrixRow(row.id)">Remove row</button></div>
+                <label class="form-field"><span>Manifestation label</span><input v-model="row.label" class="choice-input" placeholder="e.g. Risk for self-harm" /></label>
+                <div class="mt-4 space-y-3">
+                  <div v-for="option in row.options" :key="option.id" class="flex items-center gap-3">
+                    <span class="code-badge">{{ option.id }}</span>
+                    <input v-model="option.text" class="choice-input min-w-0 flex-1" placeholder="Nursing intervention" />
+                    <label class="correct-choice shrink-0"><input v-model="option.correct" type="checkbox" :name="`matrix-${row.id}`"/><span>Correct</span></label>
+                    <button type="button" class="remove-choice" :aria-label="`Remove response option ${option.id}`" @click="removeMatrixOption(row, option.id)">Remove</button>
+                  </div>
+                </div>
+                <button type="button" class="add-choice-button mt-3" @click="addMatrixOption(row)"><span>+</span> Add response</button>
+              </article>
+              <button type="button" class="add-choice-button" @click="addMatrixRow"><span>+</span> Add manifestation</button>
+            </div>
+          </section>
+          <section v-if="isMatrixClassification" class="builder-section choices-section">
+            <div class="section-heading"><span class="section-number">04</span><div><h2>Classification columns and findings</h2><p>Define the classifications once, then select independently for each finding. Each column needs at least one selection; a finding may have none.</p></div></div>
+            <div class="mb-6 space-y-3">
+              <div v-for="(column, index) in questionDraft.matrixClassificationColumns" :key="column.id" class="flex items-center gap-3">
+                <span class="code-badge">{{ matrixOptionId(index) }}</span>
+                <input v-model="column.label" class="choice-input min-w-0 flex-1" placeholder="Classification or disease process" />
+                <button type="button" class="remove-choice" :aria-label="`Remove classification ${index + 1}`" @click="removeMatrixClassificationColumn(column.id)">Remove</button>
+              </div>
+              <button type="button" class="add-choice-button" @click="addMatrixClassificationColumn"><span>+</span> Add classification column</button>
+            </div>
+            <div class="space-y-4">
+              <article v-for="(row, rowIndex) in questionDraft.matrixClassificationRows" :key="row.id" class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                <div class="mb-4 flex items-center justify-between gap-3"><h3 class="text-sm font-semibold text-slate-700">Finding {{ rowIndex + 1 }}</h3><button type="button" class="remove-choice" @click="removeMatrixClassificationRow(row.id)">Remove finding</button></div>
+                <label class="form-field"><span>Client finding</span><input v-model="row.label" class="choice-input" placeholder="e.g. Lanugo" /></label>
+                <div class="mt-4 grid gap-3 sm:grid-cols-2">
+                  <label v-for="column in questionDraft.matrixClassificationColumns" :key="column.id" class="flex items-start gap-2 rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">
+                    <input v-model="row.selectedColumnIds" type="checkbox" :value="column.id" class="mt-0.5" />
+                    <span>{{ column.label || 'Unnamed classification' }}</span>
+                  </label>
+                  <p v-if="!questionDraft.matrixClassificationColumns.length" class="text-xs text-slate-500">Add at least one classification column.</p>
+                </div>
+              </article>
+              <button type="button" class="add-choice-button" @click="addMatrixClassificationRow"><span>+</span> Add finding</button>
+            </div>
+          </section>
           <section v-if="usesChoices" class="builder-section choices-section"><div class="section-heading"><span class="section-number">04</span><div><h2>Answer choices <span class="optional-tag">Formatted content supported</span></h2><p>Add each option, mark the correct answer, then write its rationale directly below.</p></div></div>
             <div class="choice-list"><article v-for="(choice, index) in questionDraft.choices" :key="choice.id" class="choice-card"><div class="choice-topline"><div class="choice-label"><span class="choice-letter">{{ String.fromCharCode(65 + index) }}</span><span>Choice {{ index + 1 }}</span></div><label class="correct-choice"><input :checked="choice.correct" :type="questionLayout.correctAnswerMode === 'single' ? 'radio' : 'checkbox'" :name="`correct-${questionPage.code}`" @change="setCorrect(choice, $event.target.checked)"/><span>{{ questionLayout.correctAnswerMode === 'single' ? 'Correct answer' : 'Mark as correct' }}</span></label><button v-if="questionDraft.choices.length > 2" class="remove-choice" type="button" @click="removeChoice(choice.id)">Remove</button></div>
               <RichEditor :key="`${questionPage.code}-choice-${choice.id}`" v-model="choice.option" :height="90" />
@@ -1210,12 +1828,12 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
     </main>
 
     <Transition name="fade"><div v-if="modalOpen" class="modal-backdrop" @click.self="modalOpen=false"><section class="edit-modal"><div class="flex items-start justify-between border-b border-slate-100 px-6 py-5"><div><p class="eyebrow">QUESTION LIBRARY</p><h2 class="mt-1 font-display text-xl font-bold text-slate-900">{{ form.id ? 'Edit question type' : 'New question type' }}</h2><p class="mt-1 text-xs text-slate-400">Define how learners will interact with this format.</p></div><button class="modal-close" @click="modalOpen=false">×</button></div><form class="modal-body" @submit.prevent="saveQuestion"><div class="form-grid"><label class="form-field"><span>Question type name <b>*</b></span><input v-model="form.name" required placeholder="e.g. Multiple choice" /></label><label class="form-field"><span>Type code <b>*</b></span><input v-model="form.code" required placeholder="e.g. MCQ_SINGLE" /></label><label class="form-field"><span>Category</span><SearchableSelect v-model="form.category" :options="['Core', 'Written', 'Interactive']" placeholder="Select category"/></label><label class="form-field flex-row items-center justify-between"><span>Available to learners</span><button type="button" class="status-toggle" :class="{ off: !form.active }" @click="form.active=!form.active"><span class="toggle-dot"></span>{{ form.active ? 'Active' : 'Inactive' }}</button></label></div><label class="form-field editor-field"><span>Description <small>Short summary shown in the question builder</small></span><RichEditor v-model="form.description" :height="105" /></label><label class="form-field editor-field"><span>Learning guidance <small>Explain how this question format works</small></span><RichEditor v-model="form.details" :height="130" /></label><div class="modal-footer"><button type="button" class="cancel-button" @click="modalOpen=false">Cancel</button><button type="submit" class="primary-button" :disabled="!form.name.trim() || !form.code.trim()">{{ form.id ? 'Save changes' : 'Create question type' }}<span>→</span></button></div></form></section></div></Transition>
-    <Transition name="fade"><div v-if="examModalOpen" class="modal-backdrop" @click.self="examModalOpen=false"><section class="edit-modal exam-modal"><div class="flex items-start justify-between border-b border-slate-100 px-6 py-5"><div><p class="eyebrow">ASSESSMENT LIBRARY</p><h2 class="mt-1 font-display text-xl font-bold text-slate-900">{{ examForm.id ? 'Edit premade exam' : 'Create premade exam' }}</h2><p class="mt-1 text-xs text-slate-400">Set the exam details and link it to a nursing category and topic.</p></div><button class="modal-close" @click="examModalOpen=false">×</button></div>
+    <Transition name="fade"><div v-if="examModalOpen" class="modal-backdrop" @click.self="examModalOpen=false"><section class="edit-modal exam-modal"><div class="flex items-start justify-between border-b border-slate-100 px-6 py-5"><div><p class="eyebrow">ASSESSMENT LIBRARY</p><h2 class="mt-1 font-display text-xl font-bold text-slate-900">{{ examForm.id ? 'Edit premade exam' : 'Create premade exam' }}</h2><p class="mt-1 text-xs text-slate-400">Set the exam details and optionally link a broad topic.</p></div><button class="modal-close" @click="examModalOpen=false">×</button></div>
       <form class="modal-body" @submit.prevent="saveExam"><div class="form-grid">
         <label class="form-field"><span>Product <b>*</b></span><SearchableSelect :model-value="examForm.product_id" :options="productOptions" :disabled="taxonomyLoading" placeholder="Select a product" @update:model-value="changeExamProduct"/></label>
         <label class="form-field"><span>Subject <b>*</b></span><SearchableSelect :model-value="examForm.subject_id" :options="subjectOptions" :disabled="taxonomyLoading || !examForm.product_id" placeholder="Select a subject" @update:model-value="changeExamSubject"/></label>
         <label class="form-field"><span>Nursing category <b v-if="requiresNursingCategory">*</b><small v-else>Not used for TEAS or HESI exams</small></span><SearchableSelect v-model="examForm.nursing_category_id" :options="categoryOptions" :disabled="taxonomyLoading || !examForm.product_id || isCategoryOptionalProduct" :placeholder="isCategoryOptionalProduct ? 'Not required for this product' : 'Select a category'" @change="examForm.topic_id=''"/></label>
-        <label class="form-field"><span>Topic <b>*</b></span><SearchableSelect v-model="examForm.topic_id" :options="topicOptions" :disabled="taxonomyLoading || !examForm.subject_id || (requiresNursingCategory && !examForm.nursing_category_id)" placeholder="Select a topic"/></label>
+        <label class="form-field"><span>Topic <small>Optional</small></span><SearchableSelect v-model="examForm.topic_id" :options="topicOptions" :disabled="taxonomyLoading || !examForm.subject_id || (requiresNursingCategory && !examForm.nursing_category_id)" placeholder="No exam-level topic"/></label>
         <label class="form-field"><span>Exam name <b>*</b></span><input v-model="examForm.name" required placeholder="e.g. Cardiac nursing essentials" @input="updateExamSlug" /></label>
         <label class="form-field"><span>Slug <b>*</b></span><input v-model="examForm.slug" required placeholder="cardiac-nursing-essentials" /></label>
         <label class="form-field"><span>Question count</span><input v-model="examForm.question_count" type="number" min="0" step="1" /></label>
@@ -1225,7 +1843,7 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
       <p v-if="premadeExamSaveError" class="field-error mt-3 rounded-lg bg-rose-50 px-3 py-2">{{ premadeExamSaveError }}</p>
       <label class="form-field editor-field"><span>Short description <small>Brief summary shown in exam lists</small></span><RichEditor v-model="examForm.short_description" :height="100" /></label>
       <label class="form-field editor-field"><span>Description <small>Full exam overview and instructions</small></span><RichEditor v-model="examForm.description" :height="150" /></label>
-      <div class="modal-footer"><button type="button" class="cancel-button" @click="examModalOpen=false">Cancel</button><button type="submit" class="primary-button" :disabled="premadeExamSaving || !examForm.product_id || !examForm.subject_id || (requiresNursingCategory && !examForm.nursing_category_id) || !examForm.topic_id || !examForm.name.trim() || !examForm.slug.trim()">{{ premadeExamSaving ? 'Saving…' : examForm.id ? 'Save changes' : 'Create exam' }}<span v-if="!premadeExamSaving">→</span></button></div></form>
+      <div class="modal-footer"><button type="button" class="cancel-button" @click="examModalOpen=false">Cancel</button><button type="submit" class="primary-button" :disabled="premadeExamSaving || !examForm.product_id || !examForm.subject_id || (requiresNursingCategory && !examForm.nursing_category_id) || !examForm.name.trim() || !examForm.slug.trim()">{{ premadeExamSaving ? 'Saving…' : examForm.id ? 'Save changes' : 'Create exam' }}<span v-if="!premadeExamSaving">→</span></button></div></form>
     </section></div></Transition>
     <Transition name="toast"><div v-if="toast" class="toast-message"><span>✓</span>{{ toast }}</div></Transition>
   </div>

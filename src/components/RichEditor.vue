@@ -20,7 +20,37 @@ function publishContentChange() {
 function syncContent() {
   publishContentChange()
 }
-defineExpose({ syncContent })
+function wrapSelection(attributeName, attributeValue) {
+  if (!editor || editor.status !== 'ready' || editor.mode !== 'wysiwyg') return ''
+  const selection = editor.getSelection()
+  const selectedText = selection?.getSelectedText()?.trim()
+  if (!selectedText) return ''
+  const style = new window.CKEDITOR.style({
+    element: 'span',
+    attributes: { [attributeName]: attributeValue },
+    styles: { 'background-color': '#fff2a8' },
+  })
+  editor.applyStyle(style)
+  publishContentChange()
+  return selectedText
+}
+function removeMarkedText(attributeName, attributeValue) {
+  if (!editor || editor.status !== 'ready' || editor.mode !== 'wysiwyg') return
+  const elements = editor.document.find(`span[${attributeName}]`)
+  for (let index = elements.count() - 1; index >= 0; index -= 1) {
+    const element = elements.getItem(index)
+    if (element.getAttribute(attributeName) === attributeValue) element.remove(true)
+  }
+  publishContentChange()
+}
+function insertHtmlAtCursor(html) {
+  if (!editor || editor.status !== 'ready' || editor.mode !== 'wysiwyg') return false
+  editor.focus()
+  editor.insertHtml(html)
+  publishContentChange()
+  return true
+}
+defineExpose({ syncContent, wrapSelection, removeMarkedText, insertHtmlAtCursor })
 function bindSourceInput() {
   const sourceElement = editor?.container?.findOne('textarea.cke_source')?.$
   if (!sourceElement || sourceElement === sourceTextarea) return
@@ -36,7 +66,7 @@ onMounted(() => {
       height: props.height,
       removePlugins: 'elementspath',
       resize_enabled: false,
-      extraAllowedContent: 'math[*]; semantics[*]; annotation[*]; mrow[*]; mi[*]; mn[*]; mo[*]; mfrac[*]; msup[*]; msub[*]; msqrt[*]; mroot[*]; mtext[*]; mover[*]; munder[*]; munderover[*]; mtable[*]; mtr[*]; mtd[*]; menclose[*]; mstyle[*]; mspace[*]; mpadded[*]; mphantom[*]; mmultiscripts[*]; mprescripts[*]; none[*]; maction[*]; ms[*]; mglyph[*]; merror[*]',
+      extraAllowedContent: 'exhibit-placeholder[*]; span[data-highlight-id,data-dropdown-id]{background-color}; math[*]; semantics[*]; annotation[*]; mrow[*]; mi[*]; mn[*]; mo[*]; mfrac[*]; msup[*]; msub[*]; msqrt[*]; mroot[*]; mtext[*]; mover[*]; munder[*]; munderover[*]; mtable[*]; mtr[*]; mtd[*]; menclose[*]; mstyle[*]; mspace[*]; mpadded[*]; mphantom[*]; mmultiscripts[*]; mprescripts[*]; none[*]; maction[*]; ms[*]; mglyph[*]; merror[*]',
       toolbar: [
         { name: 'document', items: ['Source'] },
         { name: 'basicstyles', items: ['Bold', 'Italic', 'Underline'] },
