@@ -78,9 +78,14 @@ const subtopicsError = ref('')
 const premadeExamOptions = ref([])
 const premadeExamsLoading = ref(false)
 const premadeExamsError = ref('')
+const questionCountRefreshing = ref(false)
+const questionCountRefreshError = ref('')
 const premadeExamSaving = ref(false)
 const premadeExamSaveError = ref('')
-const sessionContext = ref({ subtopicId: '', premadeExamId: '', topicId: '', ...(restoredQuestionSession.sessionContext || {}) })
+const sessionContext = ref({
+  subtopicId: restoredQuestionSession.sessionContext?.subtopicId || '',
+  premadeExamId: restoredQuestionSession.sessionContext?.premadeExamId || '',
+})
 const contextLocked = ref(Boolean(restoredQuestionSession.contextLocked))
 const hasLockedPremadeExam = computed(() => contextLocked.value && Boolean(sessionContext.value.premadeExamId))
 const subtopicRequired = computed(() => !questionDraft.value?.premadeExamId)
@@ -112,6 +117,7 @@ watch(questionDraft, draft => {
 }, { deep: true })
 const SUBTOPICS_ENDPOINT = '/content/subtopics'
 const QUESTION_EXAMS_ENDPOINT = '/content/premade-exams'
+const QUESTION_COUNT_REFRESH_ENDPOINT = '/content/update-question-count'
 const CATEGORIES_ENDPOINT = '/content/categories'
 const TOPICS_ENDPOINT = '/content/topics'
 const PRODUCTS_ENDPOINT = '/content/products'
@@ -233,44 +239,6 @@ function examSubjectId(exam) {
   return exam?.subject_id ?? exam?.subjectId ?? exam?.subject?.id ?? exam?.subject?.subject_id
     ?? examTopic?.subject_id ?? examTopic?.subjectId ?? examTopic?.subject?.id ?? examTopic?.subject?.subject_id
 }
-const selectedQuestionExam = computed(() => {
-  const examId = questionDraft.value?.premadeExamId || sessionContext.value.premadeExamId
-  return premadeExamOptions.value.find(item => String(item.id) === String(examId))
-})
-const selectedQuestionExamSubjectId = computed(() => examSubjectId(selectedQuestionExam.value))
-const selectedQuestionExamIsNursingSchool = computed(() => {
-  const exam = selectedQuestionExam.value
-  if (!exam) return false
-  const subject = exam.subject
-    ?? subjects.value.find(item => String(item.id ?? item.subject_id) === String(selectedQuestionExamSubjectId.value))
-  const examTopicId = exam.topic_id ?? exam.topicId ?? exam.topic?.id ?? exam.topic?.topic_id
-  const examTopic = exam.topic ?? topics.value.find(item => String(item.id) === String(examTopicId))
-  const productId = exam.product_id ?? exam.productId ?? exam.product?.id ?? exam.product?.product_id
-    ?? subject?.product_id ?? subject?.productId ?? examTopic?.product_id ?? examTopic?.productId
-  return String(productId ?? '') === NURSING_SCHOOL_PRODUCT_ID
-})
-const questionTopicOptions = computed(() => {
-  const exam = selectedQuestionExam.value
-  if (!exam || !selectedQuestionExamIsNursingSchool.value) {
-    return topics.value.map(item => ({ value: String(item.id), label: item.name }))
-  }
-  if (selectedQuestionExamSubjectId.value == null) return []
-  return topics.value
-    .filter(item => {
-      const topicSubjectId = item.subject_id ?? item.subjectId ?? item.subject?.id ?? item.subject?.subject_id
-      return topicSubjectId != null
-        && String(topicSubjectId) === String(selectedQuestionExamSubjectId.value)
-    })
-    .map(item => ({ value: String(item.id), label: item.name }))
-})
-watch([questionTopicOptions, taxonomyLoading], () => {
-  const topicId = questionDraft.value?.topicId
-  if (taxonomyLoading.value || !topicId) return
-  if (!questionTopicOptions.value.some(item => item.value === String(topicId))) {
-    questionDraft.value.topicId = ''
-    sessionContext.value.topicId = ''
-  }
-})
 async function fetchTaxonomy() {
   taxonomyLoading.value = true
   taxonomyError.value = ''
@@ -365,7 +333,6 @@ function blankQuestionDraft(type) {
   return {
     subtopicId: '',
     premadeExamId: '',
-    topicId: '',
     questionIntro: '',
     prompt: '',
     answer: '',
@@ -510,6 +477,11 @@ function blankMatrixClassificationColumn() {
 function blankMatrixClassificationRow() {
   return { id: `classification-row-${nextMatrixClassificationId++}`, label: '', selectedColumnIds: [] }
 }
+function ensureMatrixClassificationFindings(draft) {
+  while (draft.matrixClassificationRows.length < 3) {
+    draft.matrixClassificationRows.push(blankMatrixClassificationRow())
+  }
+}
 function addMatrixClassificationColumn() {
   questionDraft.value.matrixClassificationColumns.push(blankMatrixClassificationColumn())
 }
@@ -614,6 +586,23 @@ async function fetchPremadeExamOptions() {
   } finally {
     premadeExamsLoading.value = false
   }
+  async function refreshQuestionCounts() {
+    questionCountRefreshing.value = true
+    questionCountRefreshError.value = ''
+    try {
+      await apiRequest(QUESTION_COUNT_REFRESH_ENDPOINT, { method: 'POST' })
+      await fetchPremadeExamOptions()
+      if (premadeExamsError.value) throw new Error(premadeExamsError.value)
+      toast.value = 'Premade exam question counts refreshed'
+      window.setTimeout(() => { toast.value = '' }, 2400)
+    } catch (error) {
+      questionCountRefreshError.value = error instanceof Error
+        ? error.message
+        : 'Premade exam question counts could not be refreshed.'
+    } finally {
+      questionCountRefreshing.value = false
+    }
+  }
 }
 async function fetchQuestions() {
   try {
@@ -666,7 +655,6 @@ async function editQuestionRecord(record) {
     questionDraft.value = {
       ...blankQuestionDraft(type), subtopicId: String(current.subtopic_id ?? ''),
       premadeExamId: current.premade_exam_id ? String(current.premade_exam_id) : '',
-      topicId: current.topic_id ? String(current.topic_id) : '',
       questionIntro: current.question_intro || '', prompt: current.question_text || '',
       answer: getQuestionTypeLayout(type.code).correctAnswerMode === 'text' ? String(answers[0] ?? '') : '',
       choices: options.map((option, index) => ({
@@ -710,7 +698,6 @@ async function editQuestionRecord(record) {
     questionDrafts.value[type.code] = questionDraft.value
     if (current.subtopic_id) sessionContext.value.subtopicId = String(current.subtopic_id)
     if (current.premade_exam_id) sessionContext.value.premadeExamId = String(current.premade_exam_id)
-    if (current.topic_id) sessionContext.value.topicId = String(current.topic_id)
   } catch (error) {
     questionPayloadError.value = error.message || 'The question could not be loaded.'
   }
@@ -736,13 +723,15 @@ function routeToQuestion(type, addHistory = true) {
     ...blankQuestionDraft(type),
     ...(questionDrafts.value[type.code] || {}),
   }
+  if (getQuestionTypeLayout(type.code).layout === 'matrixClassification') {
+    ensureMatrixClassificationFindings(questionDraft.value)
+  }
   questionDraft.value.tabs = normalizeDraftTabs(questionDraft.value.tabs)
   if (getQuestionTypeLayout(type.code).layout === 'highlight' && !Array.isArray(questionDraft.value.highlightTargets)) {
     questionDraft.value.highlightTargets = []
   }
   if (sessionContext.value.subtopicId) questionDraft.value.subtopicId = sessionContext.value.subtopicId
   if (sessionContext.value.premadeExamId) questionDraft.value.premadeExamId = sessionContext.value.premadeExamId
-  if (sessionContext.value.topicId) questionDraft.value.topicId = sessionContext.value.topicId
   if (addHistory) window.history.pushState({ questionType: type.code }, '', `?page=question&type=${encodeURIComponent(type.code)}`)
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
@@ -799,17 +788,11 @@ function updateSessionContext(field, value) {
   if (contextLocked.value) return
   sessionContext.value[field] = value
   questionDraft.value[field] = value
-  if (field === 'premadeExamId' && questionDraft.value.topicId
-    && !questionTopicOptions.value.some(item => item.value === String(questionDraft.value.topicId))) {
-    questionDraft.value.topicId = ''
-    sessionContext.value.topicId = ''
-  }
 }
 function lockQuestionContext() {
   if (!questionDraft.value.subtopicId && !questionDraft.value.premadeExamId) return
   sessionContext.value.subtopicId = questionDraft.value.subtopicId
   sessionContext.value.premadeExamId = questionDraft.value.premadeExamId
-  sessionContext.value.topicId = questionDraft.value.topicId
   contextLocked.value = true
   toast.value = 'Question context locked for this session'
   window.setTimeout(() => toast.value = '', 2400)
@@ -1224,7 +1207,7 @@ async function saveQuestionContent() {
       label: row.label.trim(),
       selectedColumnIds: row.selectedColumnIds.filter(id =>
         draft.matrixClassificationColumns.some(column => column.id === id)),
-    }))
+    })).filter(row => row.label || row.selectedColumnIds.length)
     : null
   if (isMatrixClassification.value && (
     matrixClassificationColumns.length < 2
@@ -1258,6 +1241,11 @@ async function saveQuestionContent() {
     rationale: choice.rationale || '',
     correct: choice.correct,
   })).filter(choice => htmlText(choice.text))
+  if (['MCQ_SINGLE', 'MCQ_MULTI'].includes(questionPage.value.code)
+    && !populatedChoices.some(choice => choice.correct)) {
+    questionPayloadError.value = 'Mark at least one answer choice as correct before saving.'
+    return
+  }
   const bowTieOptions = bowTieGroups ? {
     condition_options: bowTieGroups.conditionOptions.map(({ id, text }) => ({ id, text: text.trim() })),
     action_options: bowTieGroups.actionOptions.map(({ id, text }) => ({ id, text: text.trim() })),
@@ -1319,7 +1307,7 @@ async function saveQuestionContent() {
   const payload = {
     subtopic_id: draft.subtopicId ? Number(draft.subtopicId) : null,
     premade_exam_id: draft.premadeExamId ? Number(draft.premadeExamId) : null,
-    topic_id: draft.topicId ? Number(draft.topicId) : null,
+    topic_id: null,
     question_type_id: Number(questionPage.value.id),
     question_intro: draft.questionIntro || null,
     question_text: draft.prompt,
@@ -1362,7 +1350,6 @@ async function saveQuestionContent() {
   const preservedMetadata = {
     subtopicId: draft.subtopicId,
     premadeExamId: draft.premadeExamId,
-    topicId: draft.topicId,
     difficulty: draft.difficulty,
     points: draft.points,
     status: draft.status,
@@ -1655,9 +1642,10 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
         <div class="flex items-center gap-4"><button class="icon-button relative" aria-label="Notifications"><svg viewBox="0 0 24 24"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span class="notification-dot"></span></button><div class="hidden h-8 w-px bg-slate-200 sm:block"></div><div class="avatar">{{ profileInitials }}</div><button class="text-xs font-semibold text-slate-500 hover:text-indigo-600" @click="logout">Sign out</button></div>
       </header>
       <div class="mx-auto max-w-[1440px] px-5 pb-12 pt-8 sm:px-8 sm:pt-10 xl:px-12">
-        <div class="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><div class="mb-2 flex items-center gap-2"><span class="eyebrow-dot"></span><span class="eyebrow">ASSESSMENT LIBRARY</span></div><h1 class="font-display text-[29px] font-extrabold tracking-[-.04em] text-slate-900 sm:text-[34px]">Premade exams</h1><p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Create and organize ready-made nursing exams by category, with optional topics on individual questions.</p></div><button class="primary-button" @click="openNewExam"><span class="text-lg leading-none">+</span> Create premade exam</button></div>
+        <div class="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><div class="mb-2 flex items-center gap-2"><span class="eyebrow-dot"></span><span class="eyebrow">ASSESSMENT LIBRARY</span></div><h1 class="font-display text-[29px] font-extrabold tracking-[-.04em] text-slate-900 sm:text-[34px]">Premade exams</h1><p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Create and organize ready-made nursing exams by category, with optional topics on individual questions.</p></div><div class="flex flex-wrap gap-3"><button class="context-lock-button" type="button" :disabled="questionCountRefreshing" @click="refreshQuestionCounts">{{ questionCountRefreshing ? 'Refreshing counts…' : 'Refresh question counts' }}</button><button class="primary-button" @click="openNewExam"><span class="text-lg leading-none">+</span> Create premade exam</button></div></div>
         <section class="stats-grid mb-7 grid gap-4 sm:grid-cols-3"><div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></div><div><p class="stat-label">PREMADE EXAMS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ premadeExams.length }}</span><span class="stat-change">in your library</span></div></div></div><div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></div><div><p class="stat-label">ACTIVE EXAMS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ premadeExams.filter(item => item.status === 'active').length }}</span><span class="stat-change">ready to assign</span></div></div></div><div class="stat-card"><div class="stat-icon orange"><svg viewBox="0 0 24 24"><path d="M4 19V5m0 14h17M8 15l3-4 3 2 5-7"/></svg></div><div><p class="stat-label">QUESTION TOPICS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ new Set(questionRecords.map(item => questionTopicId(item)).filter(Boolean)).size }}</span><span class="stat-change">used by questions</span></div></div></div></section>
         <section class="content-panel overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_2px_12px_rgba(35,54,86,.025)]"><div class="panel-heading flex flex-col justify-between gap-4 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:px-6"><div><h2 class="font-display text-[16px] font-bold text-slate-900">Exam library</h2><p class="mt-1 text-xs text-slate-400">Premade exams linked to nursing categories; topic is optional for mixed-topic exams</p></div><span class="code-badge">{{ premadeExams.length }} total</span></div>
+          <div v-if="questionCountRefreshError" class="mx-5 mt-4 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-xs text-rose-700 sm:mx-6">{{ questionCountRefreshError }} <span class="ml-1 text-rose-600">({{ QUESTION_COUNT_REFRESH_ENDPOINT }})</span></div>
           <div v-if="taxonomyError" class="mx-5 mt-4 rounded-lg border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-800 sm:mx-6">{{ taxonomyError }} <span class="ml-1 text-amber-700">({{ CATEGORIES_ENDPOINT }}, {{ TOPICS_ENDPOINT }})</span></div>
           <div class="table-scroll"><table class="w-full border-collapse text-left"><thead><tr><th>EXAM</th><th>CATEGORY / TOPIC</th><th>CODE / SLUG</th><th>QUESTIONS</th><th>STATUS</th><th class="text-right">ACTIONS</th></tr></thead><tbody><tr v-for="exam in premadeExams" :key="exam.id" class="question-row"><td><p class="text-[13px] font-bold text-slate-800">{{ exam.name }}</p><p class="mt-1 max-w-[280px] truncate text-[11px] text-slate-400">{{ plain(exam.short_description) || 'No short description' }}</p><p class="mt-1 text-[10px] text-slate-400">{{ productName(exam.product_id) }} · {{ subjectName(exam.subject_id) }}</p></td><td><p class="text-xs font-semibold text-slate-700">{{ categoryName(exam.nursing_category_id) }}</p><p class="mt-1 text-[11px] text-slate-400">{{ topicName(exam.topic_id) }}</p></td><td><span class="code-badge">{{ exam.code }}</span><p class="mt-1 text-[10px] text-slate-400">{{ exam.slug }}</p></td><td><span class="text-xs font-semibold text-slate-700">{{ exam.question_count }}</span></td><td><span class="exam-status" :class="'exam-'+exam.status">{{ exam.status }}</span></td><td><div class="flex justify-end gap-1"><button class="row-action" title="Edit exam" @click="editExam(exam)"><svg viewBox="0 0 24 24"><path d="m14 5 5 5M4 20l4.5-1 10.8-10.8a2.1 2.1 0 0 0-3-3L5.5 16 4 20Z"/></svg></button><button class="row-action danger" title="Delete exam" @click="removeExam(exam)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M5 7l1 13h12l1-13M9 7V4h6v3"/></svg></button></div></td></tr>
             <tr v-if="premadeExams.length === 0"><td colspan="6" class="empty-state"><div class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-50 text-xl text-slate-400">▣</div><p class="font-bold text-slate-700">No premade exams yet</p><p class="mt-1 text-xs text-slate-400">Create an exam and link it to a nursing category.</p><button class="mt-4 text-xs font-bold text-indigo-600" @click="openNewExam">Create your first exam →</button></td></tr>
@@ -1681,7 +1669,6 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
             <div class="question-meta-grid">
               <label class="form-field"><span>Subtopic <b v-if="subtopicRequired">*</b><small v-else>Optional when a premade exam is locked</small></span><SearchableSelect v-model="questionDraft.subtopicId" :options="subtopicOptions" :disabled="subtopicsLoading || contextLocked" :placeholder="subtopicRequired ? 'Select a subtopic' : 'Optional · exam context is locked'" @change="updateSessionContext('subtopicId', $event)"/><small v-if="subtopicsError" class="field-error">{{ subtopicsError }} Endpoint: {{ SUBTOPICS_ENDPOINT }}</small></label>
               <label class="form-field"><span>Premade exam <small>Optional</small></span><SearchableSelect v-model="questionDraft.premadeExamId" :options="premadeExamSelectOptions" :disabled="premadeExamsLoading || contextLocked" placeholder="No premade exam" @change="updateSessionContext('premadeExamId', $event)"/><small v-if="premadeExamsLoading" class="field-hint">Loading premade exams…</small><small v-else-if="premadeExamsError" class="field-error">{{ premadeExamsError }} Endpoint: {{ QUESTION_EXAMS_ENDPOINT }}</small></label>
-              <label class="form-field"><span>Topic <small>Optional</small></span><SearchableSelect :key="`${questionDraft.premadeExamId}:${selectedQuestionExamSubjectId ?? ''}`" v-model="questionDraft.topicId" :options="questionTopicOptions" :disabled="taxonomyLoading || contextLocked" placeholder="No question topic" @change="updateSessionContext('topicId', $event)"/></label>
               <label class="form-field"><span>Question type</span><input :value="`${questionPage.name} · ID ${questionPage.id}`" readonly /></label>
               <label class="form-field"><span>Difficulty</span><SearchableSelect v-model="questionDraft.difficulty" :options="['easy', 'medium', 'hard']" placeholder="Select difficulty"/></label>
               <label class="form-field"><span>Points</span><input v-model="questionDraft.points" type="number" min="0" step="0.01" required /></label>
@@ -1695,13 +1682,6 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
               <div class="word-paste-actions"><span class="word-drop-hint">Pasting auto-fills the intro, question, and choices. Convert LaTeX before reviewing or saving.</span><button type="button" class="context-lock-button" :disabled="!htmlText(wordPasteHtml)" @click="convertPastedQuestionLatex">Convert LaTeX</button><button type="button" class="context-lock-button" :disabled="!htmlText(wordPasteHtml)" @click="importPastedQuestion">Parse again</button></div>
               <p v-if="wordImportError" class="field-error word-import-feedback">{{ wordImportError }}</p>
               <p v-if="wordImportMessage" class="word-import-success">{{ wordImportMessage }}</p>
-            </div>
-            <div v-if="questionLayout.rationalePaste" class="word-import-block rationale-import-block">
-              <div class="word-import-heading"><div><p class="word-import-title">Paste choice rationales</p><p class="word-import-copy">Use one labeled line per choice, like “A. Simvastatin: rationale text”. Bold formatting is preserved.</p></div><span class="word-badge">MCQ ONLY</span></div>
-              <div class="rationale-paste-editor"><RichEditor v-model="rationalePasteHtml" :height="170" @paste="scheduleRationaleAutoImport" @change="scheduleRationaleAutoImport" /></div>
-              <div class="word-paste-actions"><span class="word-drop-hint">Pasting auto-fills rationales. Convert LaTeX before importing if needed. A./B./C./D. or 1./2./3./4. labels map to choices.</span><button type="button" class="context-lock-button" :disabled="!htmlText(rationalePasteHtml)" @click="convertPastedRationalesLatex">Convert LaTeX</button><button type="button" class="context-lock-button" :disabled="!htmlText(rationalePasteHtml)" @click="importPastedRationales">Fill rationales again</button></div>
-              <p v-if="rationaleImportError" class="field-error word-import-feedback">{{ rationaleImportError }}</p>
-              <p v-if="rationaleImportMessage" class="word-import-success">{{ rationaleImportMessage }}</p>
             </div>
           </section>
           <section class="builder-section"><div class="section-heading"><span class="section-number">02</span><div><h2>Question introduction <span class="optional-tag">Optional</span></h2><p>Add shared context, a clinical scenario, or instructions shown before the question.</p></div></div><div class="question-editor"><RichEditor ref="introEditor" :key="`${questionPage.code}-intro`" v-model="questionDraft.questionIntro" :height="130" /></div><div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" class="context-lock-button" @click="insertExhibitPlaceholder">Insert exhibit placeholder</button><span class="text-[11px] text-slate-400">Adds the exhibit marker below the introduction.</span></div></section>
@@ -1811,12 +1791,31 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
               <button type="button" class="add-choice-button" @click="addMatrixClassificationRow"><span>+</span> Add finding</button>
             </div>
           </section>
+          <section v-if="questionLayout.rationalePaste" class="builder-section">
+            <div class="section-heading"><span class="section-number">04</span><div><h2>Extract choice rationales</h2><p>Paste labeled rationales here to fill the rationale fields in the answer choices below.</p></div></div>
+            <div class="word-import-block rationale-import-block">
+              <div class="word-import-heading"><div><p class="word-import-title">Paste choice rationales</p><p class="word-import-copy">Use one labeled line per choice, like “A. Simvastatin: rationale text”. Bold formatting is preserved.</p></div><span class="word-badge">MCQ ONLY</span></div>
+              <div class="rationale-paste-editor"><RichEditor v-model="rationalePasteHtml" :height="170" @paste="scheduleRationaleAutoImport" @change="scheduleRationaleAutoImport" /></div>
+              <div class="word-paste-actions"><span class="word-drop-hint">Pasting auto-fills rationales. Convert LaTeX before importing if needed. A./B./C./D. or 1./2./3./4. labels map to choices.</span><button type="button" class="context-lock-button" :disabled="!htmlText(rationalePasteHtml)" @click="convertPastedRationalesLatex">Convert LaTeX</button><button type="button" class="context-lock-button" :disabled="!htmlText(rationalePasteHtml)" @click="importPastedRationales">Fill rationales again</button></div>
+              <p v-if="rationaleImportError" class="field-error word-import-feedback">{{ rationaleImportError }}</p>
+              <p v-if="rationaleImportMessage" class="word-import-success">{{ rationaleImportMessage }}</p>
+            </div>
+          </section>
           <section v-if="usesChoices" class="builder-section choices-section"><div class="section-heading"><span class="section-number">04</span><div><h2>Answer choices <span class="optional-tag">Formatted content supported</span></h2><p>Add each option, mark the correct answer, then write its rationale directly below.</p></div></div>
-            <div class="choice-list"><article v-for="(choice, index) in questionDraft.choices" :key="choice.id" class="choice-card"><div class="choice-topline"><div class="choice-label"><span class="choice-letter">{{ String.fromCharCode(65 + index) }}</span><span>Choice {{ index + 1 }}</span></div><label class="correct-choice"><input :checked="choice.correct" :type="questionLayout.correctAnswerMode === 'single' ? 'radio' : 'checkbox'" :name="`correct-${questionPage.code}`" @change="setCorrect(choice, $event.target.checked)"/><span>{{ questionLayout.correctAnswerMode === 'single' ? 'Correct answer' : 'Mark as correct' }}</span></label><button v-if="questionDraft.choices.length > 2" class="remove-choice" type="button" @click="removeChoice(choice.id)">Remove</button></div>
+            <div class="choice-list"><article v-for="(choice, index) in questionDraft.choices" :key="choice.id" class="choice-card"><div class="choice-topline"><div class="choice-label"><span class="choice-letter">{{ String.fromCharCode(65 + index) }}</span><span>Choice {{ index + 1 }}</span></div><label v-if="!['MCQ_SINGLE', 'MCQ_MULTI'].includes(questionPage.code)" class="correct-choice"><input :checked="choice.correct" :type="questionLayout.correctAnswerMode === 'single' ? 'radio' : 'checkbox'" :name="`correct-${questionPage.code}`" @change="setCorrect(choice, $event.target.checked)"/><span>{{ questionLayout.correctAnswerMode === 'single' ? 'Correct answer' : 'Mark as correct' }}</span></label><button v-if="questionDraft.choices.length > 2" class="remove-choice" type="button" @click="removeChoice(choice.id)">Remove</button></div>
               <RichEditor :key="`${questionPage.code}-choice-${choice.id}`" v-model="choice.option" :height="90" />
               <div class="rationale-block"><label :for="`rationale-label-${choice.id}`" class="rationale-label"><span>Rationale</span><small>Feedback for this choice</small></label><RichEditor :key="`${questionPage.code}-rationale-${choice.id}`" v-model="choice.rationale" :height="105" /></div>
             </article></div>
             <button type="button" class="add-choice-button" @click="addChoice"><span>+</span> Add another choice</button>
+          </section>
+          <section v-if="['MCQ_SINGLE', 'MCQ_MULTI'].includes(questionPage.code)" class="builder-section">
+            <div class="section-heading"><span class="section-number">04</span><div><h2>Select correct answer{{ questionPage.code === 'MCQ_MULTI' ? 's' : '' }}</h2><p>{{ questionPage.code === 'MCQ_MULTI' ? 'Select every choice that is correct.' : 'Select one correct choice.' }}</p></div></div>
+            <div class="flex flex-wrap gap-4">
+              <label v-for="(choice, index) in questionDraft.choices" :key="choice.id" class="flex cursor-pointer items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 hover:border-indigo-200">
+                <input :checked="choice.correct" :type="questionPage.code === 'MCQ_SINGLE' ? 'radio' : 'checkbox'" :name="`correct-${questionPage.code}`" @change="setCorrect(choice, $event.target.checked)" />
+                <span class="choice-letter">{{ String.fromCharCode(65 + index) }}</span>
+              </label>
+            </div>
           </section>
           <section class="builder-section explanation-section"><div class="section-heading"><span class="section-number">05</span><div><h2>{{ isFillBlank ? 'Explanation' : 'Full explanation' }}</h2><p>{{ isFillBlank ? 'Explain why this answer is correct.' : 'Give the complete clinical reasoning after all choices and rationales.' }}</p></div></div><div class="explanation-editor"><RichEditor ref="explanationEditor" :key="`${questionPage.code}-explanation`" v-model="questionDraft.explanation" :height="190" /></div><div class="mt-2 flex flex-wrap items-center gap-3"><button type="button" class="context-lock-button" :disabled="!htmlText(questionDraft.explanation)" @click="convertExplanationLatex">Convert LaTeX</button><p v-if="explanationLatexError" class="field-error">{{ explanationLatexError }}</p><p v-if="explanationLatexMessage" class="word-import-success">{{ explanationLatexMessage }}</p></div></section>
           <p v-if="questionPayloadError" class="field-error px-6 pb-3">{{ questionPayloadError }}</p>
