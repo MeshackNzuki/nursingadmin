@@ -75,6 +75,27 @@ const questionPayloadJson = computed(() => lastQuestionPayload.value ? JSON.stri
 const subtopics = ref([])
 const subtopicsLoading = ref(false)
 const subtopicsError = ref('')
+const subtopicModalOpen = ref(false)
+const subtopicSaving = ref(false)
+const subtopicSaveError = ref('')
+const subtopicForm = ref(blankSubtopicForm())
+const subtopicSearch = ref('')
+const subtopicFilters = ref({ productId: '', subjectId: '', topicId: '' })
+const lessons = ref([])
+const lessonsLoading = ref(false)
+const lessonsError = ref('')
+const lessonSaving = ref(false)
+const lessonSaveError = ref('')
+const editingLessonId = ref(null)
+const lessonImageInput = ref(null)
+const lessonImageUploading = ref(false)
+const lessonImageUploadError = ref('')
+const lessonImageUploadResponse = ref(null)
+let activeLessonImageUploads = 0
+const lessonFilters = ref({ productId: '', subjectId: '', topicId: '' })
+const lessonForm = ref(blankLessonForm())
+const lessonEditor = ref(null)
+const lessonObjectiveMessage = ref('')
 const premadeExamOptions = ref([])
 const premadeExamsLoading = ref(false)
 const premadeExamsError = ref('')
@@ -88,8 +109,11 @@ const sessionContext = ref({
 })
 const contextLocked = ref(Boolean(restoredQuestionSession.contextLocked))
 const hasLockedPremadeExam = computed(() => contextLocked.value && Boolean(sessionContext.value.premadeExamId))
-const subtopicRequired = computed(() => !questionDraft.value?.premadeExamId)
-const hasQuestionContext = computed(() => Boolean(questionDraft.value?.subtopicId || questionDraft.value?.premadeExamId))
+const isMcqSingle = computed(() => questionPage.value?.code === 'MCQ_SINGLE')
+const subtopicRequired = computed(() => isMcqSingle.value || !questionDraft.value?.premadeExamId)
+const hasQuestionContext = computed(() => isMcqSingle.value
+  ? Boolean(questionDraft.value?.subtopicId)
+  : Boolean(questionDraft.value?.subtopicId || questionDraft.value?.premadeExamId))
 const wordPasteHtml = ref('')
 const wordImportError = ref('')
 const wordImportMessage = ref('')
@@ -116,6 +140,7 @@ watch(questionDraft, draft => {
   }
 }, { deep: true })
 const SUBTOPICS_ENDPOINT = '/content/subtopics'
+const STUDYGUIDE_IMAGES_ENDPOINT = '/content/studyguide-images'
 const QUESTION_EXAMS_ENDPOINT = '/content/premade-exams'
 const QUESTION_COUNT_REFRESH_ENDPOINT = '/content/update-question-count'
 const CATEGORIES_ENDPOINT = '/content/categories'
@@ -124,6 +149,7 @@ const PRODUCTS_ENDPOINT = '/content/products'
 const SUBJECTS_ENDPOINT = '/content/subjects'
 const QUESTION_TYPES_ENDPOINT = '/content/question-types'
 const QUESTIONS_ENDPOINT = '/content/questions'
+const LESSONS_ENDPOINT = '/content/lessons'
 const nursingCategories = ref([])
 const topics = ref([])
 const taxonomyLoading = ref(false)
@@ -198,9 +224,11 @@ async function login() {
   }
 }
 async function loadReferenceData() {
-  await Promise.all([fetchQuestionTypes(), fetchTaxonomy(), fetchSubtopics(), fetchPremadeExamOptions(), fetchQuestions()])
+  await Promise.all([fetchQuestionTypes(), fetchTaxonomy(), fetchSubtopics(), fetchPremadeExamOptions(), fetchQuestions(), fetchLessons()])
 }
 function blankExam() { return { id: null, product_id: '', subject_id: '', nursing_category_id: '', topic_id: '', name: '', slug: '', short_description: '', description: '', question_count: 0, status: 'draft' } }
+function blankSubtopicForm() { return { id: null, topic_id: '', name: '', code: '', slug: '', short_description: '', description: '', status: 'active', display_order: 1 } }
+function blankLessonForm() { return { subtopicId: '', title: '', contentHtml: '', status: 'active', displayOrder: 1 } }
 const isCategoryOptionalProduct = computed(() => {
   const product = products.value.find(item => String(item.id ?? item.product_id) === String(examForm.value.product_id))
   const productCode = String(product?.code ?? product?.slug ?? product?.name ?? '').trim().toUpperCase()
@@ -225,12 +253,80 @@ const visibleTopics = computed(() => topics.value.filter(topic => {
 const productOptions = computed(() => products.value.map(product => ({ value: String(product.id ?? product.product_id), label: product.name ?? product.title ?? product.code ?? `Product ${product.id ?? product.product_id}` })))
 const subjectOptions = computed(() => visibleSubjects.value.map(subject => ({ value: String(subject.id ?? subject.subject_id), label: subject.name ?? subject.subject_name ?? subject.title ?? subject.code ?? `Subject ${subject.id ?? subject.subject_id}` })))
 const subtopicOptions = computed(() => subtopics.value.map(item => ({ value: String(item.id), label: item.name })))
+const lessonSubjectOptions = computed(() => subjects.value
+  .filter(subject => !lessonFilters.value.productId || String(subject.product_id ?? subject.productId ?? '') === String(lessonFilters.value.productId))
+  .map(subject => ({ value: String(subject.id ?? subject.subject_id), label: subject.name ?? subject.subject_name ?? subject.title ?? subject.code ?? `Subject ${subject.id ?? subject.subject_id}` })))
+const lessonTopicOptions = computed(() => topics.value
+  .filter(topic => {
+    const subjectId = topic.subject_id ?? topic.subjectId
+    if (lessonFilters.value.subjectId && String(subjectId ?? '') !== String(lessonFilters.value.subjectId)) return false
+    if (!lessonFilters.value.productId) return true
+    const subject = subjects.value.find(item => String(item.id ?? item.subject_id) === String(subjectId))
+    const productId = topic.product_id ?? topic.productId ?? subject?.product_id ?? subject?.productId
+    return String(productId ?? '') === String(lessonFilters.value.productId)
+  })
+  .map(topic => ({ value: String(topic.id ?? topic.topic_id), label: topic.name ?? topic.topic_name ?? topic.title ?? `Topic ${topic.id ?? topic.topic_id}` })))
+const lessonSubtopicRows = computed(() => subtopics.value.filter(subtopic => {
+  if (lessonFilters.value.topicId && String(subtopicTopicId(subtopic) ?? '') !== String(lessonFilters.value.topicId)) return false
+  if (lessonFilters.value.subjectId && String(subtopicSubjectId(subtopic) ?? '') !== String(lessonFilters.value.subjectId)) return false
+  if (lessonFilters.value.productId && String(subtopicProductId(subtopic) ?? '') !== String(lessonFilters.value.productId)) return false
+  return true
+}))
+const lessonSubtopicOptions = computed(() => lessonSubtopicRows.value.map(item => ({ value: String(item.id), label: item.name })))
+watch(lessonFilters, () => {
+  if (lessonFilters.value.subjectId && !lessonSubjectOptions.value.some(item => item.value === String(lessonFilters.value.subjectId))) {
+    lessonFilters.value.subjectId = ''
+  }
+  if (lessonFilters.value.topicId && !lessonTopicOptions.value.some(item => item.value === String(lessonFilters.value.topicId))) {
+    lessonFilters.value.topicId = ''
+  }
+  if (lessonForm.value.subtopicId && !lessonSubtopicOptions.value.some(item => item.value === String(lessonForm.value.subtopicId))) {
+    lessonForm.value.subtopicId = ''
+  }
+}, { deep: true })
+watch(subtopicFilters, () => {
+  if (subtopicFilters.value.subjectId && !subtopicSubjectOptions.value.some(item => item.value === String(subtopicFilters.value.subjectId))) {
+    subtopicFilters.value.subjectId = ''
+  }
+  if (subtopicFilters.value.topicId && !subtopicTopicOptions.value.some(item => item.value === String(subtopicFilters.value.topicId))) {
+    subtopicFilters.value.topicId = ''
+  }
+}, { deep: true })
 const premadeExamSelectOptions = computed(() => [
   { value: '', label: 'No premade exam', disabled: true },
   ...premadeExamOptions.value.map(item => ({ value: String(item.id), label: item.name })),
 ])
 const categoryOptions = computed(() => visibleCategories.value.map(item => ({ value: String(item.id), label: item.name })))
 const topicOptions = computed(() => visibleTopics.value.map(item => ({ value: String(item.id), label: item.name })))
+const subtopicSubjectOptions = computed(() => subjects.value
+  .filter(subject => {
+    const productId = subject.product_id ?? subject.productId
+    return !subtopicFilters.value.productId || String(productId ?? '') === String(subtopicFilters.value.productId)
+  })
+  .map(subject => ({ value: String(subject.id ?? subject.subject_id), label: subject.name ?? subject.subject_name ?? subject.title ?? subject.code ?? `Subject ${subject.id ?? subject.subject_id}` })))
+const subtopicTopicOptions = computed(() => topics.value
+  .filter(topic => {
+    const subjectId = topic.subject_id ?? topic.subjectId
+    const subject = subjects.value.find(item => String(item.id ?? item.subject_id) === String(subjectId))
+    if (subtopicFilters.value.subjectId && String(subjectId ?? '') !== String(subtopicFilters.value.subjectId)) return false
+    if (subtopicFilters.value.productId) {
+      const productId = topic.product_id ?? topic.productId ?? subject?.product_id ?? subject?.productId
+      if (String(productId ?? '') !== String(subtopicFilters.value.productId)) return false
+    }
+    return true
+  })
+  .map(topic => ({ value: String(topic.id ?? topic.topic_id), label: topic.name ?? topic.topic_name ?? topic.title ?? `Topic ${topic.id ?? topic.topic_id}` })))
+const managedSubtopics = computed(() => {
+  const term = subtopicSearch.value.trim().toLowerCase()
+  return subtopics.value.filter(subtopic => {
+    const topicId = subtopicTopicId(subtopic)
+    const topic = topics.value.find(item => String(item.id ?? item.topic_id) === String(topicId))
+    if (subtopicFilters.value.topicId && String(topicId ?? '') !== String(subtopicFilters.value.topicId)) return false
+    if (subtopicFilters.value.subjectId && String(subtopicSubjectId(subtopic) ?? '') !== String(subtopicFilters.value.subjectId)) return false
+    if (subtopicFilters.value.productId && String(subtopicProductId(subtopic) ?? '') !== String(subtopicFilters.value.productId)) return false
+    return !term || `${subtopic.name} ${topic?.name ?? ''}`.toLowerCase().includes(term)
+  })
+})
 const NURSING_SCHOOL_PRODUCT_ID = '3'
 function examSubjectId(exam) {
   const examTopicId = exam?.topic_id ?? exam?.topicId ?? exam?.topic?.id ?? exam?.topic?.topic_id
@@ -565,11 +661,19 @@ async function fetchSubtopics() {
   try {
     const result = await apiRequest(SUBTOPICS_ENDPOINT)
     const rows = responseRows(result, ['subtopics'])
-    subtopics.value = rows.map(item => ({ ...item, id: item.id ?? item.subtopic_id, name: item.name ?? item.title ?? item.subtopic_name })).filter(item => item.id != null && item.name)
+    subtopics.value = rows.map(normalizeSubtopicRecord).filter(item => item.id != null && item.name)
   } catch (error) {
-    subtopicsError.value = 'Subtopics could not be loaded. Check the subtopics API endpoint.'
+    subtopicsError.value = error instanceof Error ? error.message : 'Subtopics could not be loaded.'
   } finally {
     subtopicsLoading.value = false
+  }
+}
+function normalizeSubtopicRecord(item) {
+  return {
+    ...item,
+    id: item.id ?? item.subtopic_id,
+    name: item.name ?? item.title ?? item.subtopic_name ?? '',
+    topic_id: item.topic_id ?? item.topicId ?? item.topic?.id ?? item.topic?.topic_id ?? '',
   }
 }
 async function fetchPremadeExamOptions() {
@@ -586,22 +690,46 @@ async function fetchPremadeExamOptions() {
   } finally {
     premadeExamsLoading.value = false
   }
-  async function refreshQuestionCounts() {
-    questionCountRefreshing.value = true
-    questionCountRefreshError.value = ''
-    try {
-      await apiRequest(QUESTION_COUNT_REFRESH_ENDPOINT, { method: 'POST' })
-      await fetchPremadeExamOptions()
-      if (premadeExamsError.value) throw new Error(premadeExamsError.value)
-      toast.value = 'Premade exam question counts refreshed'
+}
+function questionCountFromResponse(body) {
+  const data = responseData(body)
+  const count = data?.count ?? data?.question_count ?? data?.questionCount
+  return count == null || Number.isNaN(Number(count)) ? null : Number(count)
+}
+async function refreshQuestionCounts() {
+  questionCountRefreshing.value = true
+  questionCountRefreshError.value = ''
+  try {
+    const exams = premadeExams.value.filter(exam => exam.id != null)
+    if (!exams.length) {
+      toast.value = 'No premade exams to refresh'
       window.setTimeout(() => { toast.value = '' }, 2400)
-    } catch (error) {
-      questionCountRefreshError.value = error instanceof Error
-        ? error.message
-        : 'Premade exam question counts could not be refreshed.'
-    } finally {
-      questionCountRefreshing.value = false
+      return
     }
+    const updates = await Promise.all(exams.map(async exam => {
+      const response = await apiRequest(QUESTION_COUNT_REFRESH_ENDPOINT, {
+        method: 'POST',
+        body: JSON.stringify({ type: 'premade_exam', id: Number(exam.id) }),
+      })
+      return { id: exam.id, count: questionCountFromResponse(response) }
+    }))
+    updates.forEach(({ id, count }) => {
+      if (count == null) return
+      const exam = premadeExams.value.find(item => String(item.id) === String(id))
+      if (exam) exam.question_count = count
+      const option = premadeExamOptions.value.find(item => String(item.id) === String(id))
+      if (option) option.question_count = count
+    })
+    await fetchPremadeExamOptions()
+    if (premadeExamsError.value) throw new Error(premadeExamsError.value)
+    toast.value = `Refreshed ${updates.length} premade exam question count${updates.length === 1 ? '' : 's'}`
+    window.setTimeout(() => { toast.value = '' }, 2400)
+  } catch (error) {
+    questionCountRefreshError.value = error instanceof Error
+      ? error.message
+      : 'Premade exam question counts could not be refreshed.'
+  } finally {
+    questionCountRefreshing.value = false
   }
 }
 async function fetchQuestions() {
@@ -612,6 +740,18 @@ async function fetchQuestions() {
     questionPayloadError.value = error.message || 'Questions could not be loaded.'
   }
 }
+async function fetchLessons() {
+  lessonsLoading.value = true
+  lessonsError.value = ''
+  try {
+    const result = await apiRequest(LESSONS_ENDPOINT)
+    lessons.value = responseRows(result, ['lessons']).map(normalizeLessonRecord)
+  } catch (error) {
+    lessonsError.value = error instanceof Error ? error.message : 'Lessons could not be loaded.'
+  } finally {
+    lessonsLoading.value = false
+  }
+}
 function parseJsonValue(value, fallback = null) {
   if (typeof value !== 'string') return value ?? fallback
   try { return JSON.parse(value) } catch { return fallback }
@@ -619,8 +759,31 @@ function parseJsonValue(value, fallback = null) {
 function normalizeQuestionRecord(record) {
   return { ...record, options: parseJsonValue(record.options, []), correct_answer: parseJsonValue(record.correct_answer, []), tabs: parseJsonValue(record.tabs, null) }
 }
+function normalizeLessonRecord(record) {
+  return {
+    ...record,
+    id: record.id ?? record.lesson_id,
+    subtopic_id: record.subtopic_id ?? record.subtopicId ?? record.subtopic?.id,
+    title: record.title ?? record.name ?? record.lesson_title ?? '',
+    content_html: record.content_html ?? record.contentHtml ?? record.lesson ?? record.content ?? record.body ?? '',
+    status: record.status ?? (record.is_active === false ? 'draft' : 'active'),
+    display_order: record.display_order ?? record.displayOrder ?? 0,
+  }
+}
 function linkedSubtopic(record) { return subtopics.value.find(item => String(item.id) === String(record.subtopic_id)) }
 function linkedExam(record) { return premadeExams.value.find(item => String(item.id) === String(record.premade_exam_id)) }
+function lessonSubtopic(lesson) { return subtopics.value.find(item => String(item.id) === String(lesson.subtopic_id)) }
+function lessonDisplayTitle(lesson) { return lesson.title || lessonSubtopic(lesson)?.name || `Lesson ${lesson.id ?? ''}`.trim() }
+function subtopicTopicId(subtopic) { return subtopic?.topic_id ?? subtopic?.topicId ?? subtopic?.topic?.id ?? subtopic?.topic?.topic_id }
+function subtopicSubjectId(subtopic) {
+  const topic = topics.value.find(item => String(item.id ?? item.topic_id) === String(subtopicTopicId(subtopic)))
+  return subtopic?.subject_id ?? subtopic?.subjectId ?? subtopic?.subject?.id ?? subtopic?.subject?.subject_id ?? topic?.subject_id ?? topic?.subjectId
+}
+function subtopicProductId(subtopic) {
+  const subject = subjects.value.find(item => String(item.id ?? item.subject_id) === String(subtopicSubjectId(subtopic)))
+  const topic = topics.value.find(item => String(item.id ?? item.topic_id) === String(subtopicTopicId(subtopic)))
+  return subtopic?.product_id ?? subtopic?.productId ?? subtopic?.product?.id ?? subtopic?.product?.product_id ?? topic?.product_id ?? topic?.productId ?? subject?.product_id ?? subject?.productId
+}
 function questionProductId(record) {
   const topic = topics.value.find(item => String(item.id) === String(questionTopicId(record)))
   const subject = subjects.value.find(item => String(item.id ?? item.subject_id) === String(topic?.subject_id ?? topic?.subjectId))
@@ -654,7 +817,7 @@ async function editQuestionRecord(record) {
     const highlightAnswers = Array.isArray(current.correct_answer) ? current.correct_answer.map(String) : []
     questionDraft.value = {
       ...blankQuestionDraft(type), subtopicId: String(current.subtopic_id ?? ''),
-      premadeExamId: current.premade_exam_id ? String(current.premade_exam_id) : '',
+      premadeExamId: type.code === 'MCQ_SINGLE' ? '' : (current.premade_exam_id ? String(current.premade_exam_id) : ''),
       questionIntro: current.question_intro || '', prompt: current.question_text || '',
       answer: getQuestionTypeLayout(type.code).correctAnswerMode === 'text' ? String(answers[0] ?? '') : '',
       choices: options.map((option, index) => ({
@@ -697,7 +860,7 @@ async function editQuestionRecord(record) {
     }
     questionDrafts.value[type.code] = questionDraft.value
     if (current.subtopic_id) sessionContext.value.subtopicId = String(current.subtopic_id)
-    if (current.premade_exam_id) sessionContext.value.premadeExamId = String(current.premade_exam_id)
+    if (current.premade_exam_id && type.code !== 'MCQ_SINGLE') sessionContext.value.premadeExamId = String(current.premade_exam_id)
   } catch (error) {
     questionPayloadError.value = error.message || 'The question could not be loaded.'
   }
@@ -731,7 +894,7 @@ function routeToQuestion(type, addHistory = true) {
     questionDraft.value.highlightTargets = []
   }
   if (sessionContext.value.subtopicId) questionDraft.value.subtopicId = sessionContext.value.subtopicId
-  if (sessionContext.value.premadeExamId) questionDraft.value.premadeExamId = sessionContext.value.premadeExamId
+  questionDraft.value.premadeExamId = type.code === 'MCQ_SINGLE' ? '' : (sessionContext.value.premadeExamId || questionDraft.value.premadeExamId)
   if (addHistory) window.history.pushState({ questionType: type.code }, '', `?page=question&type=${encodeURIComponent(type.code)}`)
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
@@ -751,7 +914,7 @@ function syncQuestionRoute() {
     else { questionPage.value = null; questionDraft.value = null }
   } else {
     if (questionPage.value) returnToQuestionTypes(false)
-    activeSection.value = ['exams', 'all-questions'].includes(params.get('section')) ? params.get('section') : 'questions'
+    activeSection.value = ['exams', 'all-questions', 'lessons', 'subtopics'].includes(params.get('section')) ? params.get('section') : 'questions'
   }
 }
 onMounted(() => {
@@ -785,14 +948,18 @@ function insertExhibitPlaceholder() {
   if (!intro.includes(marker)) questionDraft.value.questionIntro = `${intro}${intro ? '\n' : ''}${marker}`
 }
 function updateSessionContext(field, value) {
-  if (contextLocked.value) return
+  if (field === 'premadeExamId' && isMcqSingle.value) {
+    questionDraft.value.premadeExamId = ''
+    return
+  }
+  if (contextLocked.value && !(isMcqSingle.value && field === 'subtopicId' && !sessionContext.value.subtopicId)) return
   sessionContext.value[field] = value
   questionDraft.value[field] = value
 }
 function lockQuestionContext() {
   if (!questionDraft.value.subtopicId && !questionDraft.value.premadeExamId) return
   sessionContext.value.subtopicId = questionDraft.value.subtopicId
-  sessionContext.value.premadeExamId = questionDraft.value.premadeExamId
+  sessionContext.value.premadeExamId = isMcqSingle.value ? '' : questionDraft.value.premadeExamId
   contextLocked.value = true
   toast.value = 'Question context locked for this session'
   window.setTimeout(() => toast.value = '', 2400)
@@ -1133,6 +1300,7 @@ async function saveQuestionContent() {
   const draft = questionDraft.value
   const fullExplanation = [draft.explanation, draft.fullExplanation, draft.explanation_text]
     .find(value => typeof value === 'string' && value.trim()) || null
+  if (isMcqSingle.value && !draft.subtopicId) { questionPayloadError.value = 'Select a subtopic before saving this MCQ Single question.'; return }
   if (!draft.subtopicId && !draft.premadeExamId) { questionPayloadError.value = 'Select a subtopic or premade exam before saving this question.'; return }
   if (!draft.prompt.trim()) { questionPayloadError.value = 'Enter the question before building the payload.'; return }
   if (questionLayout.value.correctAnswerMode === 'text' && !draft.answer.trim()) { questionPayloadError.value = 'Enter the accepted answer before building the payload.'; return }
@@ -1306,7 +1474,7 @@ async function saveQuestionContent() {
     : null
   const payload = {
     subtopic_id: draft.subtopicId ? Number(draft.subtopicId) : null,
-    premade_exam_id: draft.premadeExamId ? Number(draft.premadeExamId) : null,
+    premade_exam_id: !isMcqSingle.value && draft.premadeExamId ? Number(draft.premadeExamId) : null,
     topic_id: null,
     question_type_id: Number(questionPage.value.id),
     question_intro: draft.questionIntro || null,
@@ -1403,6 +1571,128 @@ async function copyQuestionPayload() {
     questionPayloadError.value = 'Clipboard access is unavailable in this browser.'
   }
 }
+function markLessonObjectives() {
+  lessonSaveError.value = ''
+  lessonObjectiveMessage.value = ''
+  const wrapped = lessonEditor.value?.wrapSelectionBlock('div', { id: 'objective' })
+  if (!wrapped) {
+    lessonSaveError.value = 'Highlight the learning objectives inside the lesson editor first.'
+    return
+  }
+  lessonObjectiveMessage.value = 'Learning objectives marked'
+  window.setTimeout(() => { lessonObjectiveMessage.value = '' }, 2400)
+}
+async function uploadLessonImage(file) {
+  activeLessonImageUploads += 1
+  lessonImageUploading.value = true
+  lessonImageUploadError.value = ''
+  try {
+    const formData = new FormData()
+    formData.append('image', file, file.name)
+    const response = await apiRequest(STUDYGUIDE_IMAGES_ENDPOINT, {
+      method: 'POST',
+      body: formData,
+    })
+    const result = responseData(response)
+    if (typeof result?.url !== 'string' || !result.url.trim()) {
+      throw new Error('The image upload response did not include a valid URL.')
+    }
+    lessonImageUploadResponse.value = result
+    return result
+  } catch (error) {
+    lessonImageUploadError.value = error instanceof Error
+      ? error.message
+      : 'The lesson image could not be uploaded.'
+    throw error
+  } finally {
+    activeLessonImageUploads -= 1
+    lessonImageUploading.value = activeLessonImageUploads > 0
+  }
+}
+async function handleLessonImageSelection(event) {
+  const [file] = event.target.files || []
+  if (!file) return
+  try {
+    await lessonEditor.value?.insertImageFile(file)
+  } catch (error) {
+    handleLessonImageUploadError(error)
+  } finally {
+    event.target.value = ''
+  }
+}
+function handleLessonImageUploadError(error) {
+  lessonImageUploadError.value = error instanceof Error
+    ? error.message
+    : 'The lesson image could not be uploaded.'
+}
+function openLessonImagePicker() {
+  lessonEditor.value?.rememberSelection()
+  lessonImageInput.value?.click()
+}
+async function saveLesson() {
+  lessonSaveError.value = ''
+  lessonEditor.value?.syncContent()
+  if (!lessonForm.value.subtopicId) { lessonSaveError.value = 'Select a subtopic before uploading the lesson.'; return }
+  if (!lessonForm.value.contentHtml.trim()) { lessonSaveError.value = 'Add the lesson HTML before uploading.'; return }
+  lessonSaving.value = true
+  try {
+    const payload = {
+      subtopic_id: Number(lessonForm.value.subtopicId),
+      content_html: lessonForm.value.contentHtml.trim(),
+      status: lessonForm.value.status,
+      display_order: Number(lessonForm.value.displayOrder) || 0,
+    }
+    if (lessonForm.value.title.trim()) payload.title = lessonForm.value.title.trim()
+    const body = JSON.stringify(payload)
+    const isEditing = editingLessonId.value != null
+    const endpoint = isEditing ? `${LESSONS_ENDPOINT}/${editingLessonId.value}` : LESSONS_ENDPOINT
+    const response = await apiRequest(endpoint, { method: isEditing ? 'PUT' : 'POST', body })
+    const saved = normalizeLessonRecord(responseData(response)?.lesson ?? responseData(response))
+    await fetchLessons()
+    lessonForm.value = blankLessonForm()
+    editingLessonId.value = null
+    toast.value = isEditing ? 'Lesson updated' : 'Lesson uploaded'
+    window.setTimeout(() => { toast.value = '' }, 2400)
+  } catch (error) {
+    lessonSaveError.value = error instanceof Error ? error.message : (editingLessonId.value != null ? 'Lesson could not be updated.' : 'Lesson could not be uploaded.')
+  } finally {
+    lessonSaving.value = false
+  }
+}
+function editLesson(lesson) {
+  const subtopic = lessonSubtopic(lesson)
+  lessonSaveError.value = ''
+  lessonFilters.value = {
+    productId: String(subtopicProductId(subtopic) ?? ''),
+    subjectId: String(subtopicSubjectId(subtopic) ?? ''),
+    topicId: String(subtopicTopicId(subtopic) ?? ''),
+  }
+  lessonForm.value = {
+    subtopicId: String(lesson.subtopic_id ?? ''),
+    title: lesson.title ?? '',
+    contentHtml: lesson.content_html ?? '',
+    status: lesson.status || 'active',
+    displayOrder: Number(lesson.display_order) || 0,
+  }
+  editingLessonId.value = lesson.id
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+function cancelLessonEdit() {
+  editingLessonId.value = null
+  lessonForm.value = blankLessonForm()
+  lessonSaveError.value = ''
+}
+async function removeLesson(lesson) {
+  if (!window.confirm(`Delete lesson "${lessonDisplayTitle(lesson)}"?`)) return
+  try {
+    await apiRequest(`${LESSONS_ENDPOINT}/${lesson.id}`, { method: 'DELETE' })
+    lessons.value = lessons.value.filter(item => String(item.id) !== String(lesson.id))
+    toast.value = 'Lesson deleted'
+    window.setTimeout(() => { toast.value = '' }, 2400)
+  } catch (error) {
+    lessonsError.value = error instanceof Error ? error.message : 'Lesson could not be deleted.'
+  }
+}
 function openNew() { form.value = blankForm(); modalOpen.value = true }
 function editQuestion(q) { form.value = { ...q }; modalOpen.value = true }
 function saveQuestion() {
@@ -1424,6 +1714,89 @@ function openSection(section) {
   questionDraft.value = null
   window.history.pushState({ section }, '', section === 'questions' ? window.location.pathname : `?section=${encodeURIComponent(section)}`)
   window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+function openNewSubtopic() {
+  subtopicForm.value = blankSubtopicForm()
+  subtopicSaveError.value = ''
+  subtopicModalOpen.value = true
+}
+function editSubtopic(subtopic) {
+  subtopicForm.value = {
+    ...blankSubtopicForm(),
+    id: subtopic.id,
+    topic_id: subtopicTopicId(subtopic) ?? '',
+    name: subtopic.name ?? '',
+    code: subtopic.code ?? '',
+    slug: subtopic.slug ?? '',
+    short_description: subtopic.short_description ?? '',
+    description: subtopic.description ?? '',
+    status: subtopic.status ?? 'active',
+    display_order: subtopic.display_order ?? 1,
+  }
+  subtopicSaveError.value = ''
+  subtopicModalOpen.value = true
+}
+function updateSubtopicName(name) {
+  subtopicForm.value.name = name
+  const slug = makeSlug(name)
+  subtopicForm.value.code = slug.replace(/-/g, '_').toUpperCase()
+  subtopicForm.value.slug = slug
+}
+async function saveSubtopic() {
+  const name = subtopicForm.value.name.trim()
+  if (!name || !subtopicForm.value.topic_id) return
+  subtopicSaving.value = true
+  subtopicSaveError.value = ''
+  const payload = {
+    topic_id: Number(subtopicForm.value.topic_id),
+    name,
+    code: subtopicForm.value.code.trim(),
+    slug: subtopicForm.value.slug.trim(),
+    short_description: subtopicForm.value.short_description.trim(),
+    description: subtopicForm.value.description.trim(),
+    status: subtopicForm.value.status,
+    display_order: Number(subtopicForm.value.display_order) || 0,
+  }
+  const isUpdate = subtopicForm.value.id != null
+  try {
+    const endpoint = isUpdate ? `${SUBTOPICS_ENDPOINT}/${subtopicForm.value.id}` : SUBTOPICS_ENDPOINT
+    const response = await apiRequest(endpoint, { method: isUpdate ? 'PUT' : 'POST', body: JSON.stringify(payload) })
+    const responseValue = responseData(response)
+    let saved = responseValue?.subtopic ?? responseValue
+    let id = saved?.id ?? saved?.subtopic_id ?? subtopicForm.value.id
+    if (id == null) {
+      await fetchSubtopics()
+      saved = subtopics.value.find(item => String(item.topic_id) === String(payload.topic_id) && item.name === payload.name)
+      id = saved?.id
+    }
+    if (id == null) throw new Error('The subtopic was submitted, but the response did not include its ID.')
+    const record = normalizeSubtopicRecord({ ...payload, ...(saved || {}), id })
+    const existingIndex = subtopics.value.findIndex(item => String(item.id) === String(id))
+    if (existingIndex >= 0) subtopics.value.splice(existingIndex, 1, record)
+    else subtopics.value.unshift(record)
+    subtopicModalOpen.value = false
+    toast.value = `Subtopic ${isUpdate ? 'updated' : 'created'}`
+    window.setTimeout(() => toast.value = '', 2400)
+  } catch (error) {
+    subtopicSaveError.value = error instanceof Error ? error.message : 'Subtopic could not be saved.'
+  } finally {
+    subtopicSaving.value = false
+  }
+}
+async function removeSubtopic(subtopic) {
+  if (!window.confirm(`Delete “${subtopic.name}”?`)) return
+  subtopicSaveError.value = ''
+  try {
+    await apiRequest(`${SUBTOPICS_ENDPOINT}/${subtopic.id}`, { method: 'DELETE' })
+    subtopics.value = subtopics.value.filter(item => String(item.id) !== String(subtopic.id))
+    if (String(lessonForm.value.subtopicId) === String(subtopic.id)) lessonForm.value.subtopicId = ''
+    if (String(sessionContext.value.subtopicId) === String(subtopic.id)) sessionContext.value.subtopicId = ''
+    if (questionDraft.value && String(questionDraft.value.subtopicId) === String(subtopic.id)) questionDraft.value.subtopicId = ''
+    toast.value = 'Subtopic deleted'
+    window.setTimeout(() => toast.value = '', 2400)
+  } catch (error) {
+    subtopicSaveError.value = error instanceof Error ? error.message : 'Subtopic could not be deleted.'
+  }
 }
 function openNewExam() { examForm.value = blankExam(); examModalOpen.value = true }
 async function editExam(exam) {
@@ -1567,6 +1940,8 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
           <a class="nav-item" href="#" @click.prevent="openSection('questions')"><span class="nav-icon">▤</span>Courses <span class="nav-count">12</span></a>
           <a class="nav-item" :class="{ current: activeSection === 'questions' }" href="#" @click.prevent="openSection('questions')"><span class="nav-icon">▧</span>Question types</a>
           <a class="nav-item" :class="{ current: activeSection === 'all-questions' }" href="#" @click.prevent="openSection('all-questions')"><span class="nav-icon">☷</span>All questions</a>
+          <a class="nav-item" :class="{ current: activeSection === 'subtopics' }" href="#" @click.prevent="openSection('subtopics')"><span class="nav-icon">▧</span>Subtopics</a>
+          <a class="nav-item" :class="{ current: activeSection === 'lessons' }" href="#" @click.prevent="openSection('lessons')"><span class="nav-icon">▥</span>Lessons</a>
           <a class="nav-item" :class="{ current: activeSection === 'exams' }" href="#" @click.prevent="openSection('exams')"><span class="nav-icon">▣</span>Premade exams</a>
           <a class="nav-item" href="#"><span class="nav-icon">♧</span>Learners</a>
           <a class="nav-item" href="#"><span class="nav-icon">◷</span>Reports</a>
@@ -1614,6 +1989,61 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
       </div>
     </main>
 
+    <main v-else-if="!questionPage && activeSection === 'subtopics'" class="lg:ml-[248px]">
+      <header class="topbar flex h-[76px] items-center justify-between border-b border-slate-200/80 bg-white px-5 sm:px-8">
+        <div class="flex items-center gap-3"><div class="mobile-mark lg:hidden">✚</div><div class="text-[13px] text-slate-400">Workspace <span class="mx-2 text-slate-300">/</span><span class="font-semibold text-slate-700">Subtopics</span></div></div>
+        <div class="flex items-center gap-4"><div class="avatar">{{ profileInitials }}</div><button class="text-xs font-semibold text-slate-500 hover:text-indigo-600" @click="logout">Sign out</button></div>
+      </header>
+      <div class="mx-auto max-w-[1440px] px-5 pb-12 pt-8 sm:px-8 sm:pt-10 xl:px-12">
+        <div class="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end">
+          <div><div class="mb-2 flex items-center gap-2"><span class="eyebrow-dot"></span><span class="eyebrow">CONTENT TAXONOMY</span></div><h1 class="font-display text-[29px] font-extrabold tracking-[-.04em] text-slate-900 sm:text-[34px]">Subtopics</h1><p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Create and manage subtopics under their parent topics.</p></div>
+          <button class="primary-button" type="button" @click="openNewSubtopic"><span class="text-lg leading-none">+</span> Add subtopic</button>
+        </div>
+        <section class="content-panel overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_2px_12px_rgba(35,54,86,.025)]">
+          <div class="panel-heading flex flex-col justify-between gap-4 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:px-6"><div><h2 class="font-display text-[16px] font-bold text-slate-900">Subtopic library</h2><p class="mt-1 text-xs text-slate-400">{{ subtopics.length }} subtopic{{ subtopics.length === 1 ? '' : 's' }} loaded from the content API</p></div><button class="export-button" type="button" :disabled="subtopicsLoading" @click="fetchSubtopics">{{ subtopicsLoading ? 'Refreshing…' : 'Refresh' }}</button></div>
+          <div class="grid gap-4 border-b border-slate-100 px-5 py-4 sm:grid-cols-2 lg:grid-cols-4 sm:px-6">
+            <label class="form-field"><span>Product</span><SearchableSelect v-model="subtopicFilters.productId" :options="productOptions" :disabled="taxonomyLoading" placeholder="All products"/></label>
+            <label class="form-field"><span>Subject</span><SearchableSelect v-model="subtopicFilters.subjectId" :options="subtopicSubjectOptions" :disabled="taxonomyLoading" placeholder="All subjects"/></label>
+            <label class="form-field"><span>Topic</span><SearchableSelect v-model="subtopicFilters.topicId" :options="subtopicTopicOptions" :disabled="taxonomyLoading" placeholder="All topics"/></label>
+            <label class="form-field"><span>Search</span><div class="search-box"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg><input v-model="subtopicSearch" placeholder="Search subtopics..."/></div></label>
+          </div>
+          <p v-if="subtopicsError" class="mx-5 mb-4 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-xs text-rose-700 sm:mx-6">{{ subtopicsError }} <span class="ml-1 text-rose-600">({{ SUBTOPICS_ENDPOINT }})</span></p>
+          <p v-if="subtopicSaveError" class="mx-5 mb-4 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-xs text-rose-700 sm:mx-6">{{ subtopicSaveError }}</p>
+          <div class="table-scroll"><table class="w-full border-collapse text-left"><thead><tr><th>SUBTOPIC</th><th>PARENT TOPIC</th><th>SUBJECT</th><th>PRODUCT</th><th class="text-right">ACTIONS</th></tr></thead><tbody>
+            <tr v-for="subtopic in managedSubtopics" :key="subtopic.id" class="question-row">
+              <td><p class="text-[13px] font-semibold text-slate-800">{{ subtopic.name }}</p><p class="mt-1 text-[10px] text-slate-400">ID {{ subtopic.id }}</p></td>
+              <td><span class="text-xs text-slate-600">{{ topicName(subtopicTopicId(subtopic)) }}</span></td>
+              <td><span class="text-xs text-slate-600">{{ subjectName(subtopicSubjectId(subtopic)) }}</span></td>
+              <td><span class="text-xs text-slate-600">{{ productName(subtopicProductId(subtopic)) }}</span></td>
+              <td><div class="flex justify-end gap-1"><button class="row-action" type="button" title="Edit subtopic" @click="editSubtopic(subtopic)"><svg viewBox="0 0 24 24"><path d="m14 5 5 5M4 20l4.5-1 10.8-10.8a2.1 2.1 0 0 0-3-3L5.5 16 4 20Z"/></svg></button><button class="row-action danger" type="button" title="Delete subtopic" @click="removeSubtopic(subtopic)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M5 7l1 13h12l1-13M9 7V4h6v3"/></svg></button></div></td>
+            </tr>
+            <tr v-if="!subtopicsLoading && managedSubtopics.length === 0"><td colspan="5" class="empty-state"><p class="font-bold text-slate-700">{{ subtopicSearch || subtopicFilters.productId || subtopicFilters.subjectId || subtopicFilters.topicId ? 'No matching subtopics' : 'No subtopics yet' }}</p><p class="mt-1 text-xs text-slate-400">Adjust filters or add a subtopic assigned to a parent topic.</p></td></tr>
+            <tr v-if="subtopicsLoading"><td colspan="5" class="empty-state text-slate-500">Loading subtopics…</td></tr>
+          </tbody></table></div>
+        </section>
+      </div>
+      <div v-if="subtopicModalOpen" class="modal-backdrop" @click.self="subtopicModalOpen = false">
+        <form class="modal-card" @submit.prevent="saveSubtopic">
+          <div class="modal-heading"><div><p class="eyebrow">CONTENT TAXONOMY</p><h2 class="mt-1 font-display text-xl font-bold text-slate-900">{{ subtopicForm.id ? 'Edit subtopic' : 'Create subtopic' }}</h2></div><button type="button" class="modal-close" aria-label="Close" @click="subtopicModalOpen = false">×</button></div>
+          <div class="space-y-4 p-5">
+            <label class="form-field"><span>Parent topic <b>*</b></span><SearchableSelect v-model="subtopicForm.topic_id" :options="subtopicTopicOptions" :disabled="taxonomyLoading || subtopicSaving" placeholder="Select a topic"/></label>
+            <label class="form-field"><span>Subtopic name <b>*</b></span><input :value="subtopicForm.name" maxlength="255" required placeholder="Enter subtopic name" :disabled="subtopicSaving" @input="updateSubtopicName($event.target.value)"/></label>
+            <div class="form-grid">
+              <label class="form-field"><span>Code <b>*</b></span><input v-model="subtopicForm.code" maxlength="100" required placeholder="CENTRAL_IDEAS" :disabled="subtopicSaving"/></label>
+              <label class="form-field"><span>Slug <b>*</b></span><input v-model="subtopicForm.slug" maxlength="150" required placeholder="central-ideas" :disabled="subtopicSaving"/></label>
+              <label class="form-field"><span>Status</span><SearchableSelect v-model="subtopicForm.status" :options="['active', 'draft', 'archived']" :disabled="subtopicSaving" placeholder="Select status"/></label>
+              <label class="form-field"><span>Display order</span><input v-model.number="subtopicForm.display_order" min="0" type="number" :disabled="subtopicSaving"/></label>
+            </div>
+            <label class="form-field"><span>Short description</span><input v-model="subtopicForm.short_description" maxlength="500" placeholder="Brief summary" :disabled="subtopicSaving"/></label>
+            <label class="form-field"><span>Description</span><textarea v-model="subtopicForm.description" rows="3" placeholder="Optional longer description" :disabled="subtopicSaving"></textarea></label>
+            <p v-if="!taxonomyLoading && subtopicTopicOptions.length === 0" class="field-error">No topics are available. Create a topic before adding a subtopic.</p>
+            <p v-if="subtopicSaveError" class="field-error rounded-lg bg-rose-50 px-3 py-2">{{ subtopicSaveError }}</p>
+          </div>
+          <div class="modal-footer"><button type="button" class="cancel-button" :disabled="subtopicSaving" @click="subtopicModalOpen = false">Cancel</button><button class="primary-button" type="submit" :disabled="subtopicSaving || !subtopicForm.topic_id || !subtopicForm.name.trim() || !subtopicForm.code.trim() || !subtopicForm.slug.trim()">{{ subtopicSaving ? 'Saving…' : 'Save subtopic' }}<span v-if="!subtopicSaving">→</span></button></div>
+        </form>
+      </div>
+    </main>
+
     <main v-else-if="!questionPage && activeSection === 'all-questions'" class="lg:ml-[248px]">
       <header class="topbar flex h-[76px] items-center justify-between border-b border-slate-200/80 bg-white px-5 sm:px-8">
         <div class="flex items-center gap-3"><div class="mobile-mark lg:hidden">✚</div><div class="text-[13px] text-slate-400">Workspace <span class="mx-2 text-slate-300">/</span><span class="font-semibold text-slate-700">All questions</span></div></div>
@@ -1631,6 +2061,73 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
           <div class="table-scroll"><table class="w-full border-collapse text-left"><thead><tr><th>QUESTION</th><th>PRODUCT / TOPIC</th><th>PREMADE EXAM</th><th>TYPE</th><th>STATUS</th><th class="text-right">ACTIONS</th></tr></thead><tbody>
             <tr v-for="record in allQuestionRecords" :key="record.id" class="question-row"><td><p class="max-w-[520px] truncate text-[13px] font-semibold text-slate-800">{{ plain(record.question_text) || 'Untitled question' }}</p><p class="mt-1 text-[10px] text-slate-400">ID {{ record.id }} · Subtopic {{ record.subtopic_id ?? '—' }}</p></td><td><p class="text-xs font-semibold text-slate-700">{{ productName(questionProductId(record)) }}</p><p class="mt-1 text-[10px] text-slate-400">{{ questionTopicId(record) ? topicName(questionTopicId(record)) : 'Topic not set' }}</p></td><td><span class="text-xs text-slate-600">{{ premadeExamOptions.find(item => String(item.id) === String(record.premade_exam_id))?.name || '—' }}</span></td><td><span class="code-badge">{{ questionTypeName(record.question_type_id) }}</span></td><td><span class="exam-status" :class="'exam-'+(record.status || 'draft')">{{ record.status || 'draft' }}</span></td><td><div class="flex justify-end gap-1"><button class="row-action" title="Edit question" @click="editQuestionRecord(record)"><svg viewBox="0 0 24 24"><path d="m14 5 5 5M4 20l4.5-1 10.8-10.8a2.1 2.1 0 0 0-3-3L5.5 16 4 20Z"/></svg></button><button class="row-action danger" title="Delete question" @click="deleteQuestionRecord(record)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M5 7l1 13h12l1-13M9 7V4h6v3"/></svg></button></div></td></tr>
             <tr v-if="allQuestionRecords.length === 0"><td colspan="6" class="empty-state"><p class="font-bold text-slate-700">No matching questions</p><p class="mt-1 text-xs text-slate-400">Adjust the filters or create questions in Question types.</p></td></tr>
+          </tbody></table></div>
+        </section>
+      </div>
+    </main>
+
+    <main v-else-if="!questionPage && activeSection === 'lessons'" class="lg:ml-[248px]">
+      <header class="topbar flex h-[76px] items-center justify-between border-b border-slate-200/80 bg-white px-5 sm:px-8">
+        <div class="flex items-center gap-3"><div class="mobile-mark lg:hidden">✚</div><div class="text-[13px] text-slate-400">Workspace <span class="mx-2 text-slate-300">/</span><span class="font-semibold text-slate-700">Lessons</span></div></div>
+        <div class="flex items-center gap-4"><div class="avatar">{{ profileInitials }}</div><button class="text-xs font-semibold text-slate-500 hover:text-indigo-600" @click="logout">Sign out</button></div>
+      </header>
+      <div class="mx-auto max-w-[1440px] px-5 pb-12 pt-8 sm:px-8 sm:pt-10 xl:px-12">
+        <div class="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><div class="mb-2 flex items-center gap-2"><span class="eyebrow-dot"></span><span class="eyebrow">LESSON LIBRARY</span></div><h1 class="font-display text-[29px] font-extrabold tracking-[-.04em] text-slate-900 sm:text-[34px]">Lessons</h1><p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Upload lesson content to a specific subtopic and filter subtopics by product, subject, and topic.</p></div><button class="context-lock-button" type="button" :disabled="lessonsLoading" @click="fetchLessons">{{ lessonsLoading ? 'Refreshing…' : 'Refresh lessons' }}</button></div>
+        <section class="stats-grid mb-7 grid gap-4 sm:grid-cols-3"><div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></div><div><p class="stat-label">LESSONS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ lessons.length }}</span><span class="stat-change">uploaded</span></div></div></div><div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></div><div><p class="stat-label">FILTERED SUBTOPICS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ lessonSubtopicRows.length }}</span><span class="stat-change">available</span></div></div></div><div class="stat-card"><div class="stat-icon orange"><svg viewBox="0 0 24 24"><path d="M4 19V5m0 14h17M8 15l3-4 3 2 5-7"/></svg></div><div><p class="stat-label">TOPICS</p><div class="mt-1 flex items-baseline gap-2"><span class="stat-value">{{ lessonTopicOptions.length }}</span><span class="stat-change">matching filters</span></div></div></div></section>
+
+        <section class="content-panel overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_2px_12px_rgba(35,54,86,.025)]">
+          <div class="panel-heading flex flex-col justify-between gap-4 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:px-6"><div><h2 class="font-display text-[16px] font-bold text-slate-900">{{ editingLessonId != null ? 'Edit lesson' : 'Upload lesson' }}</h2><p class="mt-1 text-xs text-slate-400">Choose taxonomy filters first, then select the subtopic that receives this lesson.</p></div><span class="code-badge">{{ LESSONS_ENDPOINT }}</span></div>
+          <form class="px-5 py-5 sm:px-6" @submit.prevent="saveLesson">
+            <div class="form-grid">
+              <label class="form-field"><span>Product</span><SearchableSelect v-model="lessonFilters.productId" :options="productOptions" :disabled="taxonomyLoading" placeholder="All products"/></label>
+              <label class="form-field"><span>Subject</span><SearchableSelect v-model="lessonFilters.subjectId" :options="lessonSubjectOptions" :disabled="taxonomyLoading" placeholder="All subjects"/></label>
+              <label class="form-field"><span>Topic</span><SearchableSelect v-model="lessonFilters.topicId" :options="lessonTopicOptions" :disabled="taxonomyLoading" placeholder="All topics"/></label>
+              <label class="form-field"><span>Subtopic <b>*</b></span><SearchableSelect v-model="lessonForm.subtopicId" :options="lessonSubtopicOptions" :disabled="subtopicsLoading" placeholder="Select a subtopic"/></label>
+              <label class="form-field"><span>Lesson title <small>Optional</small></span><input v-model="lessonForm.title" placeholder="Leave blank to use subtopic" /></label>
+              <label class="form-field"><span>Status</span><SearchableSelect v-model="lessonForm.status" :options="['draft', 'active', 'archived']" placeholder="Select status"/></label>
+              <label class="form-field"><span>Display order</span><input v-model.number="lessonForm.displayOrder" min="0" type="number" /></label>
+            </div>
+            <div class="mt-5">
+              <label class="form-field editor-field"><span>Lesson <small>Rich content saved as content_html</small></span><RichEditor ref="lessonEditor" v-model="lessonForm.contentHtml" :height="260" preserve-word-formatting :image-upload="uploadLessonImage" @image-upload-error="handleLessonImageUploadError" /></label>
+              <div class="mt-3 flex flex-wrap items-center gap-3">
+                <input ref="lessonImageInput" type="file" accept="image/*" class="hidden" @change="handleLessonImageSelection" />
+                <button type="button" class="context-lock-button" :disabled="lessonImageUploading" @mousedown.prevent="lessonEditor?.rememberSelection()" @click="openLessonImagePicker">{{ lessonImageUploading ? 'Uploading image…' : 'Insert lesson image' }}</button>
+                <p class="text-[11px] text-slate-500">Pasted images upload automatically. Images are uploaded before insertion into the lesson.</p>
+              </div>
+              <details class="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                <summary class="cursor-pointer font-semibold">Image upload request and response</summary>
+                <p class="mt-3 font-semibold">Request</p>
+                <pre class="mt-1 whitespace-pre-wrap break-all">POST {{ apiUrl(STUDYGUIDE_IMAGES_ENDPOINT) }}
+Authorization: Bearer &lt;sanctum-token&gt;
+Content-Type: multipart/form-data
+image: &lt;file&gt;</pre>
+                <p class="mt-3 font-semibold">Response shape</p>
+                <pre class="mt-1 whitespace-pre-wrap break-all">{
+  "message": "Study-guide image uploaded successfully.",
+  "path": "teasstudyguides/example.png",
+  "url": "https://app.nursemerit.com/storage/teasstudyguides/example.png"
+}</pre>
+                <p v-if="lessonImageUploading" class="mt-3 text-indigo-600">Uploading image and waiting for response…</p>
+                <p v-if="lessonImageUploadError" class="mt-3 text-rose-700">{{ lessonImageUploadError }}</p>
+                <div v-if="lessonImageUploadResponse" class="mt-3">
+                  <p class="font-semibold text-emerald-700">Upload complete — image URL inserted into lesson</p>
+                  <pre class="mt-1 whitespace-pre-wrap break-all">{{ JSON.stringify(lessonImageUploadResponse, null, 2) }}</pre>
+                </div>
+              </details>
+              <div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" class="context-lock-button" @click="markLessonObjectives">Mark learning objectives</button><span class="code-badge">&lt;div id="objective"&gt;</span><p v-if="lessonObjectiveMessage" class="word-import-success">{{ lessonObjectiveMessage }}</p></div>
+            </div>
+            <p v-if="lessonSaveError" class="field-error mt-3 rounded-lg bg-rose-50 px-3 py-2">{{ lessonSaveError }}</p>
+            <p v-if="subtopicsError" class="field-error mt-3">{{ subtopicsError }} Endpoint: {{ SUBTOPICS_ENDPOINT }}</p>
+            <div class="modal-footer"><button type="button" class="cancel-button" @click="editingLessonId != null ? cancelLessonEdit() : (lessonForm = blankLessonForm())">{{ editingLessonId != null ? 'Cancel edit' : 'Clear' }}</button><button class="primary-button" type="submit" :disabled="lessonSaving || !lessonForm.subtopicId || !lessonForm.contentHtml.trim()">{{ lessonSaving ? (editingLessonId != null ? 'Saving…' : 'Uploading…') : (editingLessonId != null ? 'Save changes' : 'Upload lesson') }}<span v-if="!lessonSaving">→</span></button></div>
+          </form>
+        </section>
+
+        <section class="content-panel mt-6 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_2px_12px_rgba(35,54,86,.025)]">
+          <div class="panel-heading flex flex-col justify-between gap-4 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:px-6"><div><h2 class="font-display text-[16px] font-bold text-slate-900">Lesson library</h2><p class="mt-1 text-xs text-slate-400">{{ lessons.length }} lesson{{ lessons.length === 1 ? '' : 's' }} loaded from the content API</p></div><button class="export-button" type="button" @click="fetchLessons">Refresh</button></div>
+          <div v-if="lessonsError" class="mx-5 mt-4 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-xs text-rose-700 sm:mx-6">{{ lessonsError }} <span class="ml-1 text-rose-600">({{ LESSONS_ENDPOINT }})</span></div>
+          <div class="table-scroll"><table class="w-full border-collapse text-left"><thead><tr><th>LESSON</th><th>SUBTOPIC</th><th>TOPIC</th><th>STATUS</th><th class="text-right">ACTIONS</th></tr></thead><tbody>
+            <tr v-for="lesson in lessons" :key="lesson.id" class="question-row"><td><p class="max-w-[420px] truncate text-[13px] font-semibold text-slate-800">{{ lessonDisplayTitle(lesson) }}</p><p class="mt-1 max-w-[420px] truncate text-[10px] text-slate-400">{{ plain(lesson.content_html) || `ID ${lesson.id}` }}</p></td><td><p class="text-xs font-semibold text-slate-700">{{ lessonSubtopic(lesson)?.name || `Subtopic ${lesson.subtopic_id ?? 'not set'}` }}</p><p class="mt-1 text-[10px] text-slate-400">ID {{ lesson.subtopic_id ?? '—' }}</p></td><td><span class="text-xs text-slate-600">{{ topicName(subtopicTopicId(lessonSubtopic(lesson))) }}</span></td><td><span class="exam-status" :class="'exam-'+(lesson.status || 'draft')">{{ lesson.status || 'draft' }}</span></td><td><div class="flex justify-end gap-1"><button class="row-action" title="Edit lesson" @click="editLesson(lesson)"><svg viewBox="0 0 24 24"><path d="m4 16.5-.8 4.3 4.3-.8L19 8.5 15.5 5 4 16.5ZM14 6.5l3.5 3.5"/></svg></button><button class="row-action danger" title="Delete lesson" @click="removeLesson(lesson)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M5 7l1 13h12l1-13M9 7V4h6v3"/></svg></button></div></td></tr>
+            <tr v-if="lessons.length === 0"><td colspan="5" class="empty-state"><p class="font-bold text-slate-700">No lessons yet</p><p class="mt-1 text-xs text-slate-400">Upload a lesson and assign it to a subtopic.</p></td></tr>
           </tbody></table></div>
         </section>
       </div>
@@ -1667,8 +2164,8 @@ function plain(text) { return (text || '').replace(/<[^>]*>/g, '').replace(/&nbs
           <section class="builder-section"><div class="section-heading"><span class="section-number">01</span><div><h2>Question settings</h2><p>Choose where this question belongs and set its scoring and publishing details.</p></div></div>
             <div class="context-lock-card"><div><p class="context-lock-title">Question batch context <span class="context-state" :class="{ locked: contextLocked }">{{ contextLocked ? 'Locked for this session' : 'Editable' }}</span></p><p class="context-lock-copy">{{ contextLocked ? 'These selections will carry into new questions, including across question types.' : 'Choose a subtopic or premade exam, then lock it to reuse across your question batch.' }}</p></div><button v-if="!contextLocked" type="button" class="context-lock-button" :disabled="!questionDraft.subtopicId && !questionDraft.premadeExamId" @click="lockQuestionContext">Lock for session</button><button v-else type="button" class="context-lock-button unlock" @click="unlockQuestionContext">Change context</button></div>
             <div class="question-meta-grid">
-              <label class="form-field"><span>Subtopic <b v-if="subtopicRequired">*</b><small v-else>Optional when a premade exam is locked</small></span><SearchableSelect v-model="questionDraft.subtopicId" :options="subtopicOptions" :disabled="subtopicsLoading || contextLocked" :placeholder="subtopicRequired ? 'Select a subtopic' : 'Optional · exam context is locked'" @change="updateSessionContext('subtopicId', $event)"/><small v-if="subtopicsError" class="field-error">{{ subtopicsError }} Endpoint: {{ SUBTOPICS_ENDPOINT }}</small></label>
-              <label class="form-field"><span>Premade exam <small>Optional</small></span><SearchableSelect v-model="questionDraft.premadeExamId" :options="premadeExamSelectOptions" :disabled="premadeExamsLoading || contextLocked" placeholder="No premade exam" @change="updateSessionContext('premadeExamId', $event)"/><small v-if="premadeExamsLoading" class="field-hint">Loading premade exams…</small><small v-else-if="premadeExamsError" class="field-error">{{ premadeExamsError }} Endpoint: {{ QUESTION_EXAMS_ENDPOINT }}</small></label>
+              <label class="form-field"><span>Subtopic <b v-if="subtopicRequired">*</b><small v-else>Optional when a premade exam is locked</small></span><SearchableSelect v-model="questionDraft.subtopicId" :options="subtopicOptions" :disabled="subtopicsLoading || (contextLocked && !(isMcqSingle && !sessionContext.subtopicId))" :placeholder="subtopicRequired ? 'Select a subtopic' : 'Optional · exam context is locked'" @change="updateSessionContext('subtopicId', $event)"/><small v-if="subtopicsError" class="field-error">{{ subtopicsError }} Endpoint: {{ SUBTOPICS_ENDPOINT }}</small></label>
+              <label class="form-field"><span>Premade exam <small>{{ isMcqSingle ? 'Unavailable for MCQ Single' : 'Optional' }}</small></span><SearchableSelect v-model="questionDraft.premadeExamId" :options="premadeExamSelectOptions" :disabled="isMcqSingle || premadeExamsLoading || contextLocked" placeholder="No premade exam" @change="updateSessionContext('premadeExamId', $event)"/><small v-if="isMcqSingle" class="field-hint">MCQ Single questions are saved with no premade exam.</small><small v-else-if="premadeExamsLoading" class="field-hint">Loading premade exams…</small><small v-else-if="premadeExamsError" class="field-error">{{ premadeExamsError }} Endpoint: {{ QUESTION_EXAMS_ENDPOINT }}</small></label>
               <label class="form-field"><span>Question type</span><input :value="`${questionPage.name} · ID ${questionPage.id}`" readonly /></label>
               <label class="form-field"><span>Difficulty</span><SearchableSelect v-model="questionDraft.difficulty" :options="['easy', 'medium', 'hard']" placeholder="Select difficulty"/></label>
               <label class="form-field"><span>Points</span><input v-model="questionDraft.points" type="number" min="0" step="0.01" required /></label>
