@@ -107,7 +107,7 @@ async function insertImageFile(file) {
     const image = await props.imageUpload(file)
     if (!image?.url) throw new Error('The image upload response did not include a URL.')
     if (!editor || editor.status !== 'ready' || editor.mode !== 'wysiwyg') {
-      throw new Error('The lesson editor is not ready to insert the uploaded image.')
+      throw new Error('The editor is not ready to insert the uploaded image.')
     }
     editor.focus()
     restoreImageInsertRange()
@@ -129,7 +129,7 @@ function dataUrlToFile(dataUrl, index) {
   const binary = window.atob(match[2])
   const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
   const extension = match[1].split('/')[1].replace('+xml', '')
-  return new File([bytes], `lesson-image-${Date.now()}-${index}.${extension}`, { type: match[1] })
+  return new File([bytes], `content-image-${Date.now()}-${index}.${extension}`, { type: match[1] })
 }
 async function handleImagePaste(event) {
   if (!props.imageUpload || !editor || editor.mode !== 'wysiwyg') return
@@ -138,9 +138,12 @@ async function handleImagePaste(event) {
   const parsedHtml = new DOMParser().parseFromString(html, 'text/html')
   const dataImages = [...parsedHtml.querySelectorAll('img')].filter(image =>
     image.getAttribute('src')?.startsWith('data:image/'))
-  const clipboardFiles = pasteData.dataTransfer?.$?.files
-    ? [...pasteData.dataTransfer.$.files].filter(file => file.type.startsWith('image/'))
-    : []
+  const dataTransfer = pasteData.dataTransfer
+  const nativeFiles = dataTransfer?.$?.files ? [...dataTransfer.$.files] : []
+  const transferFiles = nativeFiles.length
+    ? nativeFiles
+    : Array.from({ length: dataTransfer?.getFilesCount?.() || 0 }, (_, index) => dataTransfer.getFile(index))
+  const clipboardFiles = transferFiles.filter(file => file?.type?.startsWith('image/'))
   if (!dataImages.length && !clipboardFiles.length) return
 
   rememberSelection()
@@ -165,12 +168,12 @@ async function handleImagePaste(event) {
       }))
       editor.focus()
       restoreImageInsertRange()
-      uploaded.forEach(image => {
-        const element = new window.CKEDITOR.dom.element('img', editor.document)
+      editor.insertHtml(uploaded.map(image => {
+        const element = new window.CKEDITOR.dom.element('img')
         element.setAttribute('src', image.url)
-        element.setAttribute('alt', image.name || 'Lesson image')
-        editor.insertElement(element)
-      })
+        element.setAttribute('alt', image.name || 'Pasted image')
+        return element.getOuterHtml()
+      }).join(''))
     }
     publishContentChange()
   } catch (error) {
@@ -203,7 +206,7 @@ onMounted(() => {
       removePlugins: 'elementspath',
       resize_enabled: false,
       allowedContent: props.preserveWordFormatting ? true : undefined,
-      extraAllowedContent: 'exhibit-placeholder[*]; div[id,class]; span[data-highlight-id,data-dropdown-id]{background-color}; math[*]; semantics[*]; annotation[*]; mrow[*]; mi[*]; mn[*]; mo[*]; mfrac[*]; msup[*]; msub[*]; msqrt[*]; mroot[*]; mtext[*]; mover[*]; munder[*]; munderover[*]; mtable[*]; mtr[*]; mtd[*]; menclose[*]; mstyle[*]; mspace[*]; mpadded[*]; mphantom[*]; mmultiscripts[*]; mprescripts[*]; none[*]; maction[*]; ms[*]; mglyph[*]; merror[*]',
+      extraAllowedContent: 'img[alt,!src,width,height]; exhibit-placeholder[*]; div[id,class]; span[data-highlight-id,data-dropdown-id]{background-color}; math[*]; semantics[*]; annotation[*]; mrow[*]; mi[*]; mn[*]; mo[*]; mfrac[*]; msup[*]; msub[*]; msqrt[*]; mroot[*]; mtext[*]; mover[*]; munder[*]; munderover[*]; mtable[*]; mtr[*]; mtd[*]; menclose[*]; mstyle[*]; mspace[*]; mpadded[*]; mphantom[*]; mmultiscripts[*]; mprescripts[*]; none[*]; maction[*]; ms[*]; mglyph[*]; merror[*]',
       pasteFromWordRemoveFontStyles: !props.preserveWordFormatting,
       pasteFromWordRemoveStyles: !props.preserveWordFormatting,
       forcePasteAsPlainText: false,
